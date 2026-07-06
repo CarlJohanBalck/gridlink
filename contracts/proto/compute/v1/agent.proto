@@ -1,0 +1,200 @@
+syntax = "proto3";
+
+package compute.v1;
+
+option go_package = "gridlink/contracts/gen/compute/v1;computev1";
+
+import "compute/v1/common.proto";
+
+// AgentService is served by the COORDINATOR. Agents dial out and open one
+// long-lived bidirectional stream; all traffic in both directions flows here.
+// This inversion exists because provider machines are behind home NATs.
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream CoordinatorMessage);
+}
+
+// AdminService is a Phase-1 convenience for poking the system from the CLI.
+// Replaced by a real API + scheduler in Phase 2.
+service AdminService {
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc RunJob(RunJobRequest) returns (RunJobResponse);
+  // Phase 2
+  rpc CreateDeployment(CreateDeploymentRequest) returns (CreateDeploymentResponse);
+  rpc DeleteDeployment(DeleteDeploymentRequest) returns (DeleteDeploymentResponse);
+  rpc ListDeployments(ListDeploymentsRequest) returns (ListDeploymentsResponse);
+}
+
+// GatewayService is served by the COORDINATOR for the gateway's benefit:
+// resolve a served model name to live replica endpoints, and accept usage
+// reports (Phase 2: logged; Phase 3: metering/ledger).
+service GatewayService {
+  rpc ResolveModel(ResolveModelRequest) returns (ResolveModelResponse);
+  rpc ReportUsage(ReportUsageRequest) returns (ReportUsageResponse);
+}
+
+// ---- agent -> coordinator ----
+
+message AgentMessage {
+  oneof payload {
+    Register register = 1;              // first message on every new stream
+    Heartbeat heartbeat = 2;            // every 10s
+    JobUpdate job_update = 3;           // status transitions + log chunks
+    DeploymentUpdate deployment_update = 4;  // Phase 2
+  }
+}
+
+message Register {
+  // Empty on very first connect; coordinator assigns one in RegisterAck.
+  string node_id = 1;
+  string hostname = 2;
+  string agent_version = 3;
+  GpuInfo gpu = 4;
+  SystemInfo system = 5;
+}
+
+message Heartbeat {
+  GpuUtilization gpu_utilization = 1;
+  // Job IDs currently running, so the coordinator can reconcile after restarts.
+  repeated string active_job_ids = 2;
+  // Phase 2: deployments this agent currently runs (for reconciliation).
+  repeated string active_deployment_ids = 3;
+  // Phase 2: this node's data-plane address as reachable by the gateway.
+  // With Tailscale this is the tailnet IP; empty until known.
+  string data_plane_addr = 4;
+}
+
+message JobUpdate {
+  string job_id = 1;
+  JobState state = 2;
+  string log_chunk = 3;   // incremental stdout/stderr, may be empty
+  int32 exit_code = 4;    // meaningful only in SUCCEEDED/FAILED
+  string error = 5;       // agent-side failure reason, if any
+}
+
+// ---- coordinator -> agent ----
+
+message CoordinatorMessage {
+  oneof payload {
+    RegisterAck register_ack = 1;
+    RunJob run_job = 2;
+    CancelJob cancel_job = 3;
+    StartDeployment start_deployment = 4;  // Phase 2
+    StopDeployment stop_deployment = 5;    // Phase 2
+  }
+}
+
+message RegisterAck {
+  string node_id = 1;               // authoritative; agent persists this
+  uint32 heartbeat_interval_s = 2;  // coordinator-controlled, default 10
+}
+
+message RunJob {
+  JobSpec spec = 1;
+}
+
+message CancelJob {
+  string job_id = 1;
+}
+
+// ---- Phase 2: deployments ----
+
+message StartDeployment {
+  DeploymentSpec spec = 1;
+}
+
+message StopDeployment {
+  string deployment_id = 1;
+}
+
+message DeploymentUpdate {
+  string deployment_id = 1;
+  DeploymentState state = 2;
+  // Host port the container is published on (agent picks a free port).
+  uint32 host_port = 3;
+  string error = 4;
+}
+
+// ---- admin ----
+
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated NodeSummary nodes = 1;
+}
+
+message NodeSummary {
+  string node_id = 1;
+  string hostname = 2;
+  NodeStatus status = 3;
+  GpuInfo gpu = 4;
+  int64 last_seen_unix_ms = 5;
+}
+
+message RunJobRequest {
+  string node_id = 1;
+  JobSpec spec = 2;
+}
+
+message RunJobResponse {
+  string job_id = 1;
+}
+
+// ---- Phase 2: admin deployment CRUD ----
+
+message CreateDeploymentRequest {
+  DeploymentSpec spec = 1;   // deployment_id empty; coordinator assigns
+  uint32 replicas = 2;       // Phase 2: 1 is fine
+}
+
+message CreateDeploymentResponse {
+  string deployment_id = 1;
+}
+
+message DeleteDeploymentRequest {
+  string deployment_id = 1;
+}
+
+message DeleteDeploymentResponse {}
+
+message ListDeploymentsRequest {}
+
+message ListDeploymentsResponse {
+  repeated DeploymentSummary deployments = 1;
+}
+
+message DeploymentSummary {
+  string deployment_id = 1;
+  string served_model_name = 2;
+  string node_id = 3;
+  DeploymentState state = 4;
+}
+
+// ---- Phase 2: gateway <-> coordinator ----
+
+message ResolveModelRequest {
+  string served_model_name = 1;
+}
+
+message ResolveModelResponse {
+  repeated Replica replicas = 1;
+}
+
+message Replica {
+  string node_id = 1;
+  string deployment_id = 2;
+  // data-plane address the gateway can dial, e.g. "100.x.y.z:38000"
+  // (tailnet IP + published host port in Phase 2a).
+  string addr = 3;
+}
+
+message ReportUsageRequest {
+  string served_model_name = 1;
+  string node_id = 2;
+  string deployment_id = 3;
+  string api_key_id = 4;
+  uint64 prompt_tokens = 5;
+  uint64 completion_tokens = 6;
+  int64 timestamp_unix_ms = 7;
+}
+
+message ReportUsageResponse {}

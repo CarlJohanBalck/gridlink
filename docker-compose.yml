@@ -1,0 +1,25 @@
+# Local dev: coordinator + one agent in "fake GPU" mode (no real GPU needed).
+# NOTE: the agent needs the host Docker socket to run jobs — dev only, this
+# is exactly the kind of access real provider installs must NOT grant broadly.
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: coordinator/Dockerfile   # TODO(claude): write in Phase 1
+    environment:
+      GRIDLINK_TOKEN: dev-token
+    ports:
+      - "50051:50051"
+
+  agent:
+    build:
+      context: .
+      dockerfile: agent/Dockerfile         # TODO(claude): write in Phase 1
+    environment:
+      GRIDLINK_TOKEN: dev-token
+      GRIDLINK_COORDINATOR: coordinator:50051
+      GRIDLINK_FAKE_GPU: "1"               # TODO(claude): support in gpu.Detect
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - coordinator

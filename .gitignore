@@ -1,0 +1,5 @@
+bin/
+contracts/gen/
+*.log
+.env
+.gridlink/
