@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  # AgentService.Connect is a single bidi stream whose request/response are
+  # oneof-wrapped envelopes (AgentMessage / CoordinatorMessage), not per-call
+  # request/response pairs. The Connect{Request,Response} naming these rules
+  # want would misrepresent that, so they're excepted here.
+  except:
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_RESPONSE_STANDARD_NAME
 breaking:
   use:
     - FILE

@@ -20,6 +20,8 @@ func New(reg *registry.Registry, log *slog.Logger) *Scheduler {
 	return &Scheduler{reg: reg, log: log}
 }
 
+var _ = computev1.JobState_JOB_STATE_UNSPECIFIED // keep import until implemented
+
 // TODO(claude): implement:
 //   RunJob(nodeID string, spec *computev1.JobSpec) (jobID string, err error)
 //     - error if node unknown or OFFLINE
