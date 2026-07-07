@@ -13,6 +13,7 @@ import (
 	"gridlink/agent/internal/client"
 	"gridlink/agent/internal/gpu"
 	"gridlink/agent/internal/runner"
+	computev1 "gridlink/contracts/gen/compute/v1"
 )
 
 func main() {
@@ -28,10 +29,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// TODO(claude): implement gpu.Detect (nvidia-smi CSV parsing, NVML optional).
 	info, err := gpu.Detect(ctx)
 	if err != nil {
 		logger.Warn("gpu detection failed, registering as cpu-only", "err", err)
+		info = &computev1.GpuInfo{Vendor: "none"}
+	} else {
+		logger.Info("gpu detected",
+			"model", info.GetModel(), "vram_mb", info.GetVramTotalMb(), "count", info.GetGpuCount())
 	}
 
 	// TODO(claude): implement runner.NewDockerRunner (Docker SDK, --gpus support).
@@ -41,12 +45,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO(claude): implement the connect/re-register/backoff loop in client.
 	c := client.New(client.Config{
 		CoordinatorAddr: coordAddr,
 		Token:           token,
 		NodeIDPath:      client.DefaultNodeIDPath(),
 		GPU:             info,
+		Utilization:     gpu.Utilization,
 		Runner:          run,
 		Logger:          logger,
 	})

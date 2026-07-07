@@ -37,8 +37,11 @@ type Config struct {
 	Token           string
 	NodeIDPath      string // persisted node identity
 	GPU             *computev1.GpuInfo
-	Runner          runner.Runner
-	Logger          *slog.Logger
+	// Utilization samples GPU load for heartbeats. Optional; nil (or a
+	// sampling error) sends heartbeats without utilization.
+	Utilization func(context.Context) (*computev1.GpuUtilization, error)
+	Runner      runner.Runner
+	Logger      *slog.Logger
 }
 
 type Client struct {
@@ -215,11 +218,17 @@ func (c *Client) heartbeatLoop(ctx context.Context, out chan<- *computev1.AgentM
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			var util *computev1.GpuUtilization
+			if c.cfg.Utilization != nil {
+				u, err := c.cfg.Utilization(ctx)
+				if err == nil {
+					util = u
+				}
+			}
 			hb := &computev1.AgentMessage{Payload: &computev1.AgentMessage_Heartbeat{
 				Heartbeat: &computev1.Heartbeat{
-					// TODO: populate GpuUtilization once gpu.Utilization is
-					// implemented; nil is valid and omitted on the wire.
-					ActiveJobIds: c.activeJobIDs(),
+					GpuUtilization: util,
+					ActiveJobIds:   c.activeJobIDs(),
 				},
 			}}
 			select {
