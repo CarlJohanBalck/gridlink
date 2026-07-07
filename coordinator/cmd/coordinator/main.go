@@ -31,9 +31,6 @@ func main() {
 	reg := registry.New(logger)
 	sched := scheduler.New(reg, logger)
 
-	// TODO(claude): implement server.Serve — gRPC server hosting
-	// AgentService (bidi streams) and AdminService, with a metadata
-	// bearer-token interceptor (keep it isolated; replaced by mTLS later).
 	if err := server.Serve(ctx, server.Config{
 		Addr:      addr,
 		Token:     token,

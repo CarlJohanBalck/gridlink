@@ -5,7 +5,7 @@ services:
   coordinator:
     build:
       context: .
-      dockerfile: coordinator/Dockerfile   # TODO(claude): write in Phase 1
+      dockerfile: coordinator/Dockerfile
     environment:
       GRIDLINK_TOKEN: dev-token
     ports:
@@ -14,12 +14,18 @@ services:
   agent:
     build:
       context: .
-      dockerfile: agent/Dockerfile         # TODO(claude): write in Phase 1
+      dockerfile: agent/Dockerfile
     environment:
       GRIDLINK_TOKEN: dev-token
       GRIDLINK_COORDINATOR: coordinator:50051
-      GRIDLINK_FAKE_GPU: "1"               # TODO(claude): support in gpu.Detect
+      GRIDLINK_FAKE_GPU: "1"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Persist ~/.gridlink/node_id so the agent keeps its identity across
+      # container restarts.
+      - agent-identity:/root/.gridlink
     depends_on:
       - coordinator
+
+volumes:
+  agent-identity:
