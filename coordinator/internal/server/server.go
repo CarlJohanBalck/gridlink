@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +28,11 @@ import (
 // at; the reaper marks a node OFFLINE after 3 missed intervals.
 const HeartbeatIntervalS uint32 = 10
 
+// shutdownGrace bounds GracefulStop on shutdown. Agent streams are infinite,
+// so a bare GracefulStop would wait forever; after the grace period the
+// server is stopped hard and agents reconnect to the next coordinator.
+const shutdownGrace = 5 * time.Second
+
 type Config struct {
 	Addr      string
 	Token     string
@@ -48,7 +54,17 @@ func Serve(ctx context.Context, cfg Config) error {
 	go func() {
 		<-ctx.Done()
 		cfg.Logger.Info("shutting down gRPC server")
-		srv.GracefulStop()
+		done := make(chan struct{})
+		go func() {
+			srv.GracefulStop()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(shutdownGrace):
+			cfg.Logger.Warn("graceful stop timed out; closing agent streams")
+			srv.Stop()
+		}
 	}()
 
 	cfg.Logger.Info("coordinator listening", "addr", cfg.Addr)
@@ -71,8 +87,9 @@ func buildServer(cfg Config) *grpc.Server {
 		log:   cfg.Logger,
 	})
 	computev1.RegisterAdminServiceServer(srv, &adminServer{
-		reg: cfg.Registry,
-		log: cfg.Logger,
+		reg:   cfg.Registry,
+		sched: cfg.Scheduler,
+		log:   cfg.Logger,
 	})
 	// Reflection is a Phase-1 dev convenience so grpcurl works without proto
 	// paths. Note: the auth interceptor also guards the reflection service.
@@ -123,7 +140,7 @@ func streamAuthInterceptor(token string) grpc.StreamServerInterceptor {
 type agentServer struct {
 	computev1.UnimplementedAgentServiceServer
 	reg   *registry.Registry
-	sched *scheduler.Scheduler // TODO: OnJobUpdate/Reconcile wiring when scheduler lands
+	sched *scheduler.Scheduler
 	log   *slog.Logger
 }
 
@@ -176,9 +193,9 @@ func (s *agentServer) Connect(stream grpc.BidiStreamingServer[computev1.AgentMes
 		switch p := msg.Payload.(type) {
 		case *computev1.AgentMessage_Heartbeat:
 			s.reg.Touch(nodeID, p.Heartbeat)
+			s.sched.Reconcile(nodeID, p.Heartbeat.GetActiveJobIds())
 		case *computev1.AgentMessage_JobUpdate:
-			// TODO: scheduler.OnJobUpdate when scheduler is implemented.
-			log.Debug("job update", "job_id", p.JobUpdate.GetJobId(), "state", p.JobUpdate.GetState())
+			s.sched.OnJobUpdate(nodeID, p.JobUpdate)
 		case *computev1.AgentMessage_Register:
 			// Redundant re-register on a live stream; refresh in place.
 			s.reg.Upsert(p.Register, send)
@@ -192,14 +209,34 @@ func (s *agentServer) Connect(stream grpc.BidiStreamingServer[computev1.AgentMes
 
 type adminServer struct {
 	computev1.UnimplementedAdminServiceServer
-	reg *registry.Registry
-	log *slog.Logger
+	reg   *registry.Registry
+	sched *scheduler.Scheduler
+	log   *slog.Logger
 }
 
 func (s *adminServer) ListNodes(_ context.Context, _ *computev1.ListNodesRequest) (*computev1.ListNodesResponse, error) {
 	return &computev1.ListNodesResponse{Nodes: s.reg.List()}, nil
 }
 
-// RunJob and the deployment RPCs stay on UnimplementedAdminServiceServer
-// (returning Unimplemented) until the scheduler (Phase 1) / deployments
-// (Phase 2) land.
+func (s *adminServer) RunJob(_ context.Context, req *computev1.RunJobRequest) (*computev1.RunJobResponse, error) {
+	if req.GetNodeId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "node_id is required")
+	}
+	if req.GetSpec().GetImage() == "" {
+		return nil, status.Error(codes.InvalidArgument, "spec.image is required")
+	}
+
+	jobID, err := s.sched.RunJob(req.GetNodeId(), req.GetSpec())
+	switch {
+	case errors.Is(err, scheduler.ErrUnknownNode):
+		return nil, status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, scheduler.ErrNodeOffline):
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	case err != nil:
+		return nil, status.Error(codes.Unavailable, err.Error())
+	}
+	return &computev1.RunJobResponse{JobId: jobID}, nil
+}
+
+// The deployment RPCs stay on UnimplementedAdminServiceServer (returning
+// Unimplemented) until Phase 2.
