@@ -38,7 +38,6 @@ func main() {
 			"model", info.GetModel(), "vram_mb", info.GetVramTotalMb(), "count", info.GetGpuCount())
 	}
 
-	// TODO(claude): implement runner.NewDockerRunner (Docker SDK, --gpus support).
 	run, err := runner.NewDockerRunner(logger)
 	if err != nil {
 		logger.Error("docker unavailable", "err", err)
