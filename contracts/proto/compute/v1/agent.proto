@@ -109,9 +109,14 @@ message StopDeployment {
 message DeploymentUpdate {
   string deployment_id = 1;
   DeploymentState state = 2;
-  // Host port the container is published on (agent picks a free port).
+  // Port the engine serves on, picked by the agent: a published container port
+  // for ContainerEngine, a local listener for NativeEngine.
   uint32 host_port = 3;
   string error = 4;
+  // 0-100 during PULLING (GB-scale weight downloads on consumer uplinks are
+  // slow enough that operators need to distinguish "downloading" from "stuck").
+  // Meaningless in other states.
+  uint32 progress_percent = 5;
 }
 
 // ---- admin ----

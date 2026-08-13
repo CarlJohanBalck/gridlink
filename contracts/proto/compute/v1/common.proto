@@ -30,6 +30,21 @@ message GpuInfo {
   string driver_version = 4;
   string cuda_version = 5;   // empty for non-NVIDIA
   uint32 gpu_count = 6;
+  // Memory actually available to GPU workloads, which is what placement must
+  // use. On Apple Silicon this is Metal's recommendedMaxWorkingSetSize: ~78%
+  // of RAM (measured 12713 MB on a 16 GB M4, vs 16384 reported above). On
+  // NVIDIA it is free VRAM. 0 = unknown, in which case a scheduler should
+  // refuse to place rather than fall back to vram_total_mb.
+  uint64 usable_vram_mb = 7;
+}
+
+// What a node can execute. A node advertises every runner it supports; the
+// coordinator must not place a deployment a node has no runner for. Macs
+// report NATIVE_METAL only (no Docker), Linux+NVIDIA boxes report DOCKER.
+enum RunnerKind {
+  RUNNER_KIND_UNSPECIFIED = 0;
+  RUNNER_KIND_DOCKER = 1;
+  RUNNER_KIND_NATIVE_METAL = 2;
 }
 
 message SystemInfo {
@@ -37,8 +52,11 @@ message SystemInfo {
   string arch = 2;
   uint32 cpu_cores = 3;
   uint64 ram_total_mb = 4;
-  string docker_version = 5;
+  string docker_version = 5;   // empty on macOS: Docker is not used there
   bool nvidia_container_toolkit = 6;
+  // Execution paths this node supports. Empty means the node can register and
+  // heartbeat but take no work.
+  repeated RunnerKind runners = 7;
 }
 
 message GpuUtilization {
@@ -51,8 +69,11 @@ message GpuUtilization {
 
 enum DeploymentState {
   DEPLOYMENT_STATE_UNSPECIFIED = 0;
-  DEPLOYMENT_STATE_PULLING = 1;   // pulling container image
-  DEPLOYMENT_STATE_LOADING = 2;   // container up, model weights loading
+  // Fetching what is needed to serve: a container image, or GGUF weights.
+  // Weights are GB-scale on consumer uplinks, so this state can last minutes;
+  // DeploymentUpdate.progress_percent tracks it.
+  DEPLOYMENT_STATE_PULLING = 1;
+  DEPLOYMENT_STATE_LOADING = 2;   // engine up, model weights loading
   DEPLOYMENT_STATE_READY = 3;     // /v1/models responds; serving traffic
   DEPLOYMENT_STATE_FAILED = 4;
   DEPLOYMENT_STATE_STOPPED = 5;
@@ -60,15 +81,49 @@ enum DeploymentState {
 
 // A long-running inference server on one node. Unlike JobSpec (run to
 // completion), a deployment runs until stopped and exposes an HTTP port.
+//
+// The engine oneof is the execution seam: a spec targets EITHER a container
+// (Linux + NVIDIA) or the agent's built-in Metal engine (macOS). The
+// coordinator picks based on the node's advertised SystemInfo.runners.
 message DeploymentSpec {
   string deployment_id = 1;        // assigned by coordinator
   string served_model_name = 2;    // routing key, e.g. "llama-3.1-8b-instruct"
-  string model_ref = 3;            // HF repo, e.g. "meta-llama/Llama-3.1-8B-Instruct"
-  string image = 4;                // e.g. "vllm/vllm-openai:latest"
-  repeated string extra_args = 5;  // engine flags, e.g. --max-model-len=8192
-  map<string, string> env = 6;     // e.g. HF_TOKEN (Phase 2: plumbed as-is; TODO secrets)
-  uint32 container_port = 7;       // default 8000 (vLLM OpenAI server)
-  uint64 min_vram_mb = 8;          // scheduler hint
+  // Minimum usable GPU memory required. Compared against
+  // GpuInfo.usable_vram_mb, never vram_total_mb.
+  uint64 min_vram_mb = 8;
+
+  oneof engine {
+    ContainerEngine container = 9;
+    NativeEngine native = 10;
+  }
+
+  reserved 3 to 7;  // was: model_ref/image/extra_args/env/container_port,
+  reserved "model_ref", "image", "extra_args", "env", "container_port";
+}
+
+// Serve via a containerized OpenAI-compatible server (vLLM). Linux + NVIDIA.
+message ContainerEngine {
+  string model_ref = 1;            // HF repo, e.g. "meta-llama/Llama-3.1-8B-Instruct"
+  string image = 2;                // e.g. "vllm/vllm-openai:latest"
+  repeated string extra_args = 3;  // engine flags, e.g. --max-model-len=8192
+  map<string, string> env = 4;     // e.g. HF_TOKEN (Phase 2: plumbed as-is; TODO secrets)
+  uint32 container_port = 5;       // default 8000 (vLLM OpenAI server)
+}
+
+// Serve via the agent's embedded llama.cpp/Metal engine. macOS only. The
+// agent downloads weights into its own cache and runs them; the coordinator
+// never supplies executable code, only which weights to fetch.
+message NativeEngine {
+  string model_ref = 1;      // HF repo, e.g. "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+  // Exact GGUF filename in that repo. Required: one repo holds many
+  // quantizations and they differ hugely in memory and quality.
+  string model_file = 2;     // e.g. "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+  string revision = 3;       // git revision for reproducibility; "" = main
+  // Hex SHA-256 of the GGUF. The agent MUST refuse to load a file that does
+  // not match: weights land on providers' machines, so an unverified download
+  // is a supply-chain hole. Empty only in dev.
+  string sha256 = 4;
+  uint32 context_length = 5; // 0 = engine default
 }
 
 // The ONLY thing an agent will execute. Deliberately narrow: no host mounts,

@@ -1,5 +1,5 @@
-// Package deploy runs long-lived inference containers (Phase 2). Sibling of
-// runner (one-shot jobs); shares the Docker client.
+// Package deploy runs long-lived inference servers (Phase 2). Sibling of
+// runner (one-shot jobs).
 package deploy
 
 import (
@@ -16,22 +16,36 @@ type Update struct {
 	Err          string
 }
 
-// Manager starts/stops deployment containers and health-checks them.
+// Manager starts/stops deployments and health-checks them. DeploymentSpec
+// carries a `engine` oneof, and the Manager dispatches on it: NativeEngine on
+// macOS (the primary path), ContainerEngine on Linux + NVIDIA. A node only
+// ever receives specs matching a RunnerKind it advertised.
 //
-// Implementation plan (Phase 2):
-//   Start(spec):
-//     - pull spec.Image (state PULLING)
-//     - pick a free host port; run container publishing
-//       hostPort -> spec.ContainerPort, GPU access, restart policy "no"
-//       (the COORDINATOR owns restarts/re-placement, not Docker)
-//     - vLLM args: ["--model", spec.ModelRef,
+// Implementation plan (Phase 2) — NativeEngine (primary):
+//     - resolve spec.Native.ModelFile in ModelRef@Revision; download to
+//       ~/.gridlink/models/ if absent (state PULLING, report
+//       progress_percent; weights are GB-scale on consumer uplinks)
+//     - verify SHA-256 against spec.Native.Sha256 BEFORE loading; mismatch
+//       is FAILED, never a load attempt
+//     - spawn the agent binary as `agent engine` under sandbox-exec, bound to
+//       a free localhost port; state LOADING
+//     - warm the engine once at agent startup: the first-ever Metal shader
+//       compile costs ~6.5s, ~0.01s cached thereafter
+//     - poll GET 127.0.0.1:<hostPort>/v1/models -> READY
+//     - engine process exits or health fails 3x -> FAILED with its stderr tail
+//
+// Implementation plan (Phase 2) — ContainerEngine (Linux + NVIDIA only):
+//     - pull spec.Container.Image (state PULLING)
+//     - pick a free host port; publish hostPort -> spec.Container.ContainerPort,
+//       GPU access, restart policy "no" (the COORDINATOR owns restarts and
+//       re-placement, not Docker)
+//     - vLLM args: ["--model", spec.Container.ModelRef,
 //                   "--served-model-name", spec.ServedModelName] + ExtraArgs
 //     - mount a persistent named volume at /root/.cache/huggingface so
 //       weights survive container restarts (NOT a host bind mount)
-//     - state LOADING; poll GET 127.0.0.1:<hostPort>/v1/models every 5s
-//       (weights can take minutes on first pull) -> READY
-//     - container exits or health fails 3x -> FAILED with container logs tail
-//   Stop(deploymentID): docker stop (30s grace) + remove; state STOPPED.
+//
+//   Stop(deploymentID): stop the engine subprocess (or container, 30s grace)
+//     and remove; state STOPPED.
 //   List(): active deployment IDs, for Heartbeat.active_deployment_ids.
 //
 // Client wiring (client.go): handle StartDeployment / StopDeployment from
