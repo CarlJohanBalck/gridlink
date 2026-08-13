@@ -19,8 +19,9 @@ to require Phase 2+ functionality, stop and flag it instead of building it.
 
 ### Phase roadmap (context only — do not implement future phases)
 1. **Plumbing (now):** register / heartbeat / run container job over one stream
-2. Inference endpoints: vLLM containers + OpenAI-compatible gateway
-   (spec: docs/PHASE2.md — scaffolding exists but stays unimplemented in Phase 1)
+2. Inference endpoints: native Metal engine on Mac providers + OpenAI-compatible
+   gateway (spec: docs/PHASE2.md — scaffolding exists but stays unimplemented in
+   Phase 1)
 3. Metering + ledger (Postgres), dashboard
 4. Payments (Stripe Connect / USDC), verification & reputation
 
@@ -30,9 +31,20 @@ to require Phase 2+ functionality, stop and flag it instead of building it.
   long-lived bidirectional gRPC stream (`AgentService.Connect`) to the coordinator
   and everything (registration, heartbeats, job commands, job status) flows over it.
   The coordinator NEVER dials the agent.
-- **All workloads run in Docker containers** via the local Docker daemon with the
-  NVIDIA Container Toolkit (`--gpus`). The agent never executes raw commands from
-  the coordinator on the host. Job spec = image + env + resource limits only.
+- **The coordinator never supplies executable code.** This is the invariant;
+  containers were only ever the mechanism. A job spec names an image or a model
+  plus parameters — never a command to run on the host.
+- **Execution is platform-dependent** behind the `runner.Runner` interface:
+  - *Linux + NVIDIA:* Docker via the local daemon with the NVIDIA Container
+    Toolkit (`--gpus`). Job spec = image + env + resource limits.
+  - *macOS (Apple Silicon):* a native inference engine (llama.cpp built with
+    embedded Metal shaders), run as a **subprocess of the agent binary itself**
+    (`agent engine`) under `sandbox-exec`. Docker is NOT used on macOS: Docker
+    Desktop is an app install, and its Linux VM cannot reach Metal at all —
+    containers on macOS see no GPU device. Job spec = model + sampling params.
+- **Mac providers must need zero preinstalled apps.** One signed, notarized
+  binary, no Docker, no Python, no Homebrew. Anything a provider would have to
+  install first is a non-starter. (Build-machine tooling like cmake is fine.)
 - **Protobuf contracts are the source of truth.** Both binaries build against
   generated code from `contracts/proto/`. Change the proto first, regenerate
   (`make proto`), then update both sides in the same commit.
@@ -40,6 +52,20 @@ to require Phase 2+ functionality, stop and flag it instead of building it.
   reasonable; approved deps: `google.golang.org/grpc`, `google.golang.org/protobuf`,
   `github.com/docker/docker` (client), `github.com/NVIDIA/go-nvml` (optional,
   fall back to parsing `nvidia-smi --query-gpu=... --format=csv`).
+  GPU detection is per-platform: `nvidia-smi` CSV on Linux, `system_profiler
+  SPDisplaysDataType -json` on macOS (vendor `apple`). Phase 2 adds llama.cpp
+  vendored and linked via cgo — the only cgo in the tree, macOS-only.
+- **Horizontal scale-out only — never shard a model across nodes.** One node
+  serves one whole model; the coordinator routes each request to exactly one
+  node. No tensor or pipeline parallelism, no cross-node hop in the request
+  path. Rejected because providers are strangers' machines on separate home
+  networks: tensor parallelism needs an all-reduce per layer (~80 per token for
+  a 70B) against ~7ms LAN / 30-80ms WAN round-trips, and pipeline parallelism
+  leaves every node but one idle per request while making any single node's
+  departure fail every in-flight request through it. Capacity scales with the
+  number of providers, not with the size of one model.
+- **Model size is bounded by one node's memory.** ~7-8B quantized on a 16GB M4,
+  larger models only on higher-memory Macs. Advertise and route accordingly.
 - **IDs:** coordinator assigns `node_id` (UUIDv4) at first registration; the agent
   persists it in `~/.gridlink/node_id` and reuses it on reconnect.
 - **Auth (Phase 1):** shared bootstrap token via `GRIDLINK_TOKEN` env var sent in
