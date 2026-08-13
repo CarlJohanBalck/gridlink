@@ -4,10 +4,10 @@ Distributed GPU compute platform: personal computers contribute GPU power via
 a lightweight agent; a coordinator schedules containerized AI workloads onto
 them. Later phases add inference endpoints, metering, and payouts.
 
-**Status: Phase 1** — plumbing only (register / heartbeat / run one container
-job). See `CLAUDE.md` for architecture decisions, conventions, and the
-definition of done. That file is the source of truth for contributors and for
-Claude Code sessions.
+**Status: Phase 1 complete**, starting Phase 2 (inference on Apple Silicon
+providers). See `docs/STATUS.md` for where things stand and what's next,
+`CLAUDE.md` for architecture decisions and conventions, and `docs/PHASE2.md`
+for the Phase 2 spec and measured engine-spike results.
 
 ## Quick start (dev)
 
