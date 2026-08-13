@@ -73,8 +73,12 @@ func (r *Registry) Upsert(reg *computev1.Register, send func(*computev1.Coordina
 	n.Status = computev1.NodeStatus_NODE_STATUS_ONLINE
 	n.Send = send
 
+	// already_known is scoped to THIS coordinator process, not to the node's
+	// history: the registry is in-memory, so a restarted coordinator logs
+	// already_known=false for an agent that is very much reconnecting. Only
+	// new_id=true means the coordinator had never seen this agent before.
 	r.log.Info("node registered",
-		"node_id", id, "hostname", n.Hostname, "new_id", fresh, "reconnect", ok)
+		"node_id", id, "hostname", n.Hostname, "new_id", fresh, "already_known", ok)
 	return id
 }
 
