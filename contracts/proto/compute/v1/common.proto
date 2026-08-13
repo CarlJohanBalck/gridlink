@@ -20,8 +20,12 @@ enum JobState {
 }
 
 message GpuInfo {
-  string vendor = 1;         // "nvidia" | "amd" | "none"
-  string model = 2;          // e.g. "NVIDIA GeForce RTX 4090"
+  string vendor = 1;         // "nvidia" | "amd" | "apple" | "none"
+  string model = 2;          // e.g. "NVIDIA GeForce RTX 4090", "Apple M4 (10-core GPU)"
+  // Dedicated VRAM on discrete GPUs. On Apple Silicon ("apple") there is no
+  // dedicated VRAM: this reports TOTAL unified memory, shared with the CPU and
+  // the OS, of which Metal may only wire down a fraction. Do not treat it as
+  // an allocatable budget when scheduling.
   uint64 vram_total_mb = 3;
   string driver_version = 4;
   string cuda_version = 5;   // empty for non-NVIDIA
