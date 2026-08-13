@@ -30,6 +30,39 @@ not part of this path (see CLAUDE.md for why).
    NORMAL on consumer hardware; the reconciler is not an edge case, it's the
    product.
 
+## Engine spike results (measured, Mac mini M4 base / 16GB / macOS 26.5.2)
+
+Session 0 ran. Verdict: **viable, build it.** A Go binary with llama.cpp linked
+via cgo drove Metal with no installed dependencies.
+
+- **Self-contained: confirmed.** `otool -L` on the linked binary lists only
+  `/usr/lib` and `/System/Library` — nothing from Homebrew, no OpenSSL despite
+  cmake finding it at configure time. `GGML_METAL_EMBED_LIBRARY=ON` works:
+  the log says `using embedded metal library`, so no `.metallib` ships
+  alongside. Binary was 7.5 MB with static llama.cpp/ggml.
+- **Throughput (Llama 3.1 8B Q4_K_M, 33/33 layers on GPU):** 19.4 tok/s
+  generation, 147.6 tok/s prefill. Comfortably above reading speed, so it is a
+  usable product on a *base* M4. Qwen2.5 0.5B: ~145 tok/s generation.
+- **Memory:** 8B Q4 occupies ~4.6 GB weights + 256 MB KV + 267 MB compute
+  ≈ 5.2 GB. Fits with room to spare.
+- **Scheduling must NOT use total RAM.** Metal reports
+  `recommendedMaxWorkingSetSize = 12713 MB` on this 16 GB machine — the usable
+  GPU budget is ~78% of RAM. The agent currently registers 16384 MB (from
+  `hw.memsize`), overstating by 29%. Placement decisions must use the Metal
+  figure; the engine has cgo and can query it, so it should report the real
+  budget rather than the detector guessing.
+- **Cold start:** the first-ever run compiles Metal shaders (6.5 s); every run
+  after is 0.01 s (OS-cached). Warm the engine once at agent startup so a
+  provider's first job does not eat the penalty.
+- **`sandbox-exec` is viable.** Metal works under a `(deny default)` profile
+  given `iokit-open`, `mach-lookup`, `file-read*` and a writable scratch
+  subpath — full speed, GPU still `MTL0 (Apple M4)`.
+- **Gatekeeper will kill an unnotarized agent.** With a quarantine xattr set,
+  the ad-hoc-signed binary was **SIGKILLed (exit 137)** with no output at all,
+  and `spctl -a` returned `rejected`. This is silent and total: not a warning
+  dialog, not a degraded mode. Notarization is a hard prerequisite for any
+  download-based install, not a polish step.
+
 ## Distribution decision
 
 The agent must be **Developer ID signed and notarized**. An ad-hoc signed
