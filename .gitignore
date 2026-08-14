@@ -3,3 +3,6 @@ contracts/gen/
 *.log
 .env
 .gridlink/
+
+# llama.cpp is fetched+built by scripts/fetch-llama.sh, not vendored
+agent/internal/engine/third_party/

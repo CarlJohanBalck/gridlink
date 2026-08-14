@@ -1,9 +1,21 @@
-.PHONY: proto build build-linux-arm64 test run-coord run-agent lint
+.PHONY: proto build build-linux-arm64 engine engine-check test run-coord run-agent lint
+
+LLAMA_LIB := agent/internal/engine/third_party/llama.cpp/build/src/libllama.a
 
 proto: ## regenerate Go code from contracts/proto (requires buf: https://buf.build)
 	cd contracts && buf generate && buf lint
 
-build: ## build both binaries into ./bin
+engine: ## fetch + build llama.cpp for the macOS Metal engine (build machine only)
+	./scripts/fetch-llama.sh
+
+# On macOS the agent links llama.cpp, so a missing build is a confusing pile of
+# cgo linker errors. Fail early with the one command that fixes it.
+engine-check:
+	@if [ "$$(uname -s)" = "Darwin" ] && [ ! -f "$(LLAMA_LIB)" ]; then \
+		echo "error: Metal engine not built. Run: make engine" >&2; exit 1; \
+	fi
+
+build: engine-check ## build all binaries into ./bin
 	mkdir -p bin
 	cd coordinator && go build -o ../bin/coordinator ./cmd/coordinator
 	cd agent && go build -o ../bin/agent ./cmd/agent

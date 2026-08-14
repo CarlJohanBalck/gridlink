@@ -11,6 +11,8 @@ import (
 	"syscall"
 
 	"gridlink/agent/internal/client"
+	"gridlink/agent/internal/deploy"
+	"gridlink/agent/internal/engine"
 	"gridlink/agent/internal/gpu"
 	"gridlink/agent/internal/runner"
 	"gridlink/agent/internal/sysinfo"
@@ -18,6 +20,16 @@ import (
 )
 
 func main() {
+	// One binary, two roles. `agent engine` is spawned by the agent itself as
+	// a sandboxed subprocess so providers still install exactly one file.
+	if len(os.Args) > 1 && os.Args[1] == "engine" {
+		if err := runEngine(os.Args[2:]); err != nil {
+			slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("engine failed", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	coordAddr := envOr("GRIDLINK_COORDINATOR", "localhost:50051")
@@ -55,10 +67,26 @@ func main() {
 		// seam for a field nothing reads yet.
 	}
 
-	// NOTE: RUNNER_KIND_NATIVE_METAL is deliberately NOT advertised yet. The
-	// Metal engine lands in a later session; advertising it now would invite
-	// deployments this agent cannot serve. Add it here alongside a non-nil
-	// client.Config.Deployments, never before.
+	// The native Metal engine. Advertised only when it actually exists in this
+	// build, so a node never attracts deployments it cannot serve.
+	var deployments deploy.Manager
+	if engine.Supported() {
+		nm, err := deploy.NewNativeManager(logger)
+		if err != nil {
+			logger.Error("metal engine unavailable", "err", err)
+		} else {
+			deployments = nm
+			system.Runners = append(system.Runners, computev1.RunnerKind_RUNNER_KIND_NATIVE_METAL)
+			// usable_vram_mb is what placement uses; total unified memory
+			// overstates it by ~29% on Apple Silicon.
+			if st, err := engine.GPUStats(); err == nil && info != nil {
+				info.UsableVramMb = st.UsableVRAMMb
+				logger.Info("metal engine ready",
+					"gpu", st.GPUName, "usable_vram_mb", st.UsableVRAMMb)
+			}
+		}
+	}
+
 	if len(system.GetRunners()) == 0 {
 		logger.Warn("node has no usable runner; it will register but take no work",
 			"os", system.GetOs(), "arch", system.GetArch())
@@ -72,6 +100,7 @@ func main() {
 		System:          system,
 		Utilization:     gpu.Utilization,
 		Runner:          run,
+		Deployments:     deployments,
 		DataPlaneAddr:   os.Getenv("GRIDLINK_DATA_ADDR"),
 		Logger:          logger,
 	})
