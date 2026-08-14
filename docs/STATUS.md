@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-14**, branch `main`, HEAD `d2885c9`, working tree clean.
+Last updated: **2026-08-14**, branch `main`, HEAD `c5a6a98`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -50,29 +50,54 @@ heartbeats. Docker is no longer required to start: an unreachable daemon
 downgrades advertised capability instead of exiting, and RunJob fails cleanly
 on a runner-less node. Registration is logged with os/arch/runners/gpu.
 
-## Next: Phase 2, session 3 — the Metal engine
+**Session 3 (the Metal engine) is done** — `c5a6a98`. A Mac provider can now
+actually serve a model:
 
-This is the big one, and the first cgo in the tree.
+- `make engine` fetches + builds llama.cpp (pinned commit) via
+  `scripts/fetch-llama.sh`; `make build` fails fast with that instruction if
+  it is missing. Not vendored into git.
+- `agent engine` loads a GGUF and serves `/v1/models`, `/v1/chat/completions`
+  (streaming and not), `/health`. The agent re-execs itself to spawn it under
+  `sandbox-exec`.
+- `deploy.NativeManager` downloads weights with progress, verifies SHA-256
+  before loading, spawns the engine, polls to READY, and reports STOPPED on
+  cancellation. Verified end to end on the M4 under the real sandbox.
+- `usable_vram_mb` is populated by the engine (12123 MB on this 16 GB M4) and
+  `RUNNER_KIND_NATIVE_METAL` is advertised only when the engine exists in the
+  build. The Mac now registers `runners=[RUNNER_KIND_NATIVE_METAL]`.
+- The Pi cross-build is still pure Go via a non-cgo stub.
 
-1. **Vendor llama.cpp** and build it with `GGML_METAL=ON` +
-   `GGML_METAL_EMBED_LIBRARY=ON` as part of `make build` on darwin. Rebuild
-   commands are at the bottom of this file; the spike proved the flags.
-2. **`agent engine` subcommand.** One binary, two roles: the agent spawns
-   itself under `sandbox-exec` so an engine crash cannot take down the stream.
-   A profile with `iokit-open`, `mach-lookup`, `file-read*` and a writable
-   scratch subpath was verified to run Metal at full speed.
-3. **Implement `deploy.Manager`** per the plan in the doc comment in
-   [deploy.go](../agent/internal/deploy/deploy.go): download weights with
-   progress, verify SHA-256 *before* loading, spawn the engine, poll to READY.
-4. **Report `usable_vram_mb`** from Metal's `recommendedMaxWorkingSetSize`. The
-   engine has cgo and can query it; the detector cannot.
-5. **Then** advertise `RUNNER_KIND_NATIVE_METAL` in main.go beside a non-nil
-   `Deployments` manager — not before, or the node attracts work it cannot do.
+Two opt-in tests exercise real hardware and are skipped by default, so
+`make test` stays GPU-free:
 
-Keep `make build-linux-arm64` (the Pi) pure Go and CGO_ENABLED=0.
+```bash
+S=/path/to/models
+GRIDLINK_TEST_MODEL=$S/qwen0.5b.gguf go test ./internal/engine/ -run TestManualGenerate -v
+GRIDLINK_TEST_MODEL=$S/qwen0.5b.gguf GRIDLINK_TEST_AGENT_BIN=$PWD/bin/agent \
+  go test ./internal/deploy/ -run TestManualNativeDeployment -v
+```
 
-Deliberately still NOT started: the gateway, and placement/reconciliation on
-the coordinator.
+## Next: Phase 2, session 4 — coordinator placement
+
+The agent side is complete; nothing can drive it yet. `AdminService.CreateDeployment`
+and `coordinator/internal/deployments` are still stubs, so a deployment can
+only be started from a Go test.
+
+1. **Implement the deployments store + reconciler** in
+   `coordinator/internal/deployments`: desired state, placement onto an ONLINE
+   node whose `SystemInfo.runners` includes the spec's engine kind and whose
+   `GpuInfo.usable_vram_mb` >= `min_vram_mb` (never `vram_total_mb`; and 0
+   means unknown, so refuse to place).
+2. **Wire `CreateDeployment` / `DeleteDeployment` / `ListDeployments`** on
+   AdminService, and route `StartDeployment` / `StopDeployment` down the
+   existing agent stream.
+3. **Consume `DeploymentUpdate`** and `Heartbeat.active_deployment_ids` to
+   reconcile after a coordinator restart — re-sending StartDeployment for a
+   deployment the agent already runs is expected and already ignored agent-side.
+4. **Re-place on node loss**, which is the actual product: consumer nodes
+   disappear constantly.
+
+Then session 5 is the gateway.
 
 ## Open items that need you, not code
 
@@ -81,13 +106,18 @@ the coordinator.
   unnotarized binary carrying a quarantine xattr was **SIGKILLed (exit 137)**
   with no output; `spctl` returned `rejected`. Start enrollment before the
   engine work lands, or there is nothing to ship it in.
-- **`usable_vram_mb` has no producer yet.** The field exists and the contract
-  says 0 means "refuse to place". Querying Metal needs cgo, which arrives with
-  the engine — so the engine should report it rather than the detector
-  guessing. Until then placement must not run.
 - **`NodeSummary` does not expose `SystemInfo`**, so `ListNodes` cannot show a
-  node's runners or RAM — only the coordinator's registration log does. Worth
-  adding when the admin surface next changes.
+  node's runners, RAM, or `usable_vram_mb` — only the coordinator's
+  registration log does. Worth adding in session 4, since placement decisions
+  will be impossible to debug from the outside otherwise.
+- **No token accounting yet.** The engine does not report prompt/completion
+  token counts, which Phase 2's definition of done requires for usage JSONL.
+  llama.cpp knows them; they need plumbing through `engine.Token` and the
+  chat response's `usage` field.
+- **Engine concurrency is one request at a time**, serialized by a mutex. That
+  is correct for one llama.cpp context, but it means a slow generation blocks
+  the next request rather than queueing with any fairness. Fine for now; worth
+  revisiting when the gateway can drive real load.
 - **Pre-existing `go vet` failures in `agent/internal/runner/docker_test.go`**
   (a range variable copying a mutex, and an unused cancel on some paths). Not
   introduced by the Phase 2 work, but `go vet ./...` is not clean in the agent
