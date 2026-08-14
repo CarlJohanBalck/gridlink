@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-13**, branch `main`, HEAD `6459c50`, working tree clean.
+Last updated: **2026-08-14**, branch `main`, HEAD `d2885c9`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -42,23 +42,37 @@ are in docs/PHASE2.md.
 `engine` oneof (ContainerEngine | NativeEngine), plus `GpuInfo.usable_vram_mb`,
 `SystemInfo.runners`, and `DeploymentUpdate.progress_percent`.
 
-## Next: Phase 2, session 2 — agent-side wiring
+**Session 2 (agent-side wiring) is done** — `d2885c9`. The agent reports
+`SystemInfo` (it previously sent none at all) including a `runners` capability
+list, handles StartDeployment/StopDeployment against a `deploy.Manager`
+interface, and reports `active_deployment_ids` + `data_plane_addr` in
+heartbeats. Docker is no longer required to start: an unreachable daemon
+downgrades advertised capability instead of exiting, and RunJob fails cleanly
+on a runner-less node. Registration is logged with os/arch/runners/gpu.
 
-1. **Advertise capability.** Populate `SystemInfo.runners` in `Register`:
-   `RUNNER_KIND_NATIVE_METAL` on darwin/arm64, `RUNNER_KIND_DOCKER` where a
-   Docker daemon is reachable. Without this the coordinator cannot place
-   anything on a mixed fleet.
-2. **Handle StartDeployment / StopDeployment** on the existing stream in
-   `agent/internal/client`, dispatching to `agent/internal/deploy`. The
-   implementation plan is written out in the `Manager` doc comment in
-   [deploy.go](../agent/internal/deploy/deploy.go).
-3. **Fake engine in tests.** Same pattern as `runner.Runner`: never require a
-   real GPU, a real download, or a real Docker daemon in unit tests.
-4. Emit `DeploymentUpdate` (with `progress_percent` during PULLING) and include
-   `active_deployment_ids` in every Heartbeat.
+## Next: Phase 2, session 3 — the Metal engine
 
-Deliberately NOT in session 2: the real llama.cpp engine (session 3+), the
-gateway, and placement/reconciliation on the coordinator.
+This is the big one, and the first cgo in the tree.
+
+1. **Vendor llama.cpp** and build it with `GGML_METAL=ON` +
+   `GGML_METAL_EMBED_LIBRARY=ON` as part of `make build` on darwin. Rebuild
+   commands are at the bottom of this file; the spike proved the flags.
+2. **`agent engine` subcommand.** One binary, two roles: the agent spawns
+   itself under `sandbox-exec` so an engine crash cannot take down the stream.
+   A profile with `iokit-open`, `mach-lookup`, `file-read*` and a writable
+   scratch subpath was verified to run Metal at full speed.
+3. **Implement `deploy.Manager`** per the plan in the doc comment in
+   [deploy.go](../agent/internal/deploy/deploy.go): download weights with
+   progress, verify SHA-256 *before* loading, spawn the engine, poll to READY.
+4. **Report `usable_vram_mb`** from Metal's `recommendedMaxWorkingSetSize`. The
+   engine has cgo and can query it; the detector cannot.
+5. **Then** advertise `RUNNER_KIND_NATIVE_METAL` in main.go beside a non-nil
+   `Deployments` manager — not before, or the node attracts work it cannot do.
+
+Keep `make build-linux-arm64` (the Pi) pure Go and CGO_ENABLED=0.
+
+Deliberately still NOT started: the gateway, and placement/reconciliation on
+the coordinator.
 
 ## Open items that need you, not code
 
@@ -71,6 +85,13 @@ gateway, and placement/reconciliation on the coordinator.
   says 0 means "refuse to place". Querying Metal needs cgo, which arrives with
   the engine — so the engine should report it rather than the detector
   guessing. Until then placement must not run.
+- **`NodeSummary` does not expose `SystemInfo`**, so `ListNodes` cannot show a
+  node's runners or RAM — only the coordinator's registration log does. Worth
+  adding when the admin surface next changes.
+- **Pre-existing `go vet` failures in `agent/internal/runner/docker_test.go`**
+  (a range variable copying a mutex, and an unused cancel on some paths). Not
+  introduced by the Phase 2 work, but `go vet ./...` is not clean in the agent
+  module until they are fixed.
 - **cgo enters the tree with the engine.** The agent's macOS build will then
   need Xcode CLT and lose trivial cross-compilation. `make build-linux-arm64`
   (the Pi target) must keep working — it is pure Go and should stay that way.
