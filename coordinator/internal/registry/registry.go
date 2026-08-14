@@ -78,7 +78,11 @@ func (r *Registry) Upsert(reg *computev1.Register, send func(*computev1.Coordina
 	// already_known=false for an agent that is very much reconnecting. Only
 	// new_id=true means the coordinator had never seen this agent before.
 	r.log.Info("node registered",
-		"node_id", id, "hostname", n.Hostname, "new_id", fresh, "already_known", ok)
+		"node_id", id, "hostname", n.Hostname, "new_id", fresh, "already_known", ok,
+		// Capability is the thing an operator most needs at registration: a node
+		// with no runners is silently useless otherwise.
+		"os", n.System.GetOs(), "arch", n.System.GetArch(),
+		"runners", n.System.GetRunners(), "gpu", n.GPU.GetModel())
 	return id
 }
 

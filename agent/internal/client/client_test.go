@@ -32,11 +32,12 @@ type fakeCoord struct {
 	assignID  string
 	dropFirst bool // close the first connection right after RegisterAck
 
-	mu         sync.Mutex
-	registers  []*computev1.Register
-	heartbeats []*computev1.Heartbeat
-	jobUpdates []*computev1.JobUpdate
-	connCount  int
+	mu            sync.Mutex
+	registers     []*computev1.Register
+	heartbeats    []*computev1.Heartbeat
+	jobUpdates    []*computev1.JobUpdate
+	deployUpdates []*computev1.DeploymentUpdate
+	connCount     int
 
 	send chan *computev1.CoordinatorMessage // test -> agent, on the live stream
 }
@@ -87,6 +88,8 @@ func (f *fakeCoord) Connect(stream grpc.BidiStreamingServer[computev1.AgentMessa
 				f.heartbeats = append(f.heartbeats, p.Heartbeat)
 			case *computev1.AgentMessage_JobUpdate:
 				f.jobUpdates = append(f.jobUpdates, p.JobUpdate)
+			case *computev1.AgentMessage_DeploymentUpdate:
+				f.deployUpdates = append(f.deployUpdates, p.DeploymentUpdate)
 			}
 			f.mu.Unlock()
 		}

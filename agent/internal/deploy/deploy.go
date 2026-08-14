@@ -3,7 +3,7 @@
 package deploy
 
 import (
-	"log/slog"
+	"context"
 
 	computev1 "gridlink/contracts/gen/compute/v1"
 )
@@ -14,49 +14,47 @@ type Update struct {
 	State        computev1.DeploymentState
 	HostPort     uint32
 	Err          string
+	// Progress is 0-100 and meaningful only during PULLING, where GB-scale
+	// weight downloads otherwise look identical to a hung deployment.
+	Progress uint32
 }
 
-// Manager starts/stops deployments and health-checks them. DeploymentSpec
-// carries a `engine` oneof, and the Manager dispatches on it: NativeEngine on
-// macOS (the primary path), ContainerEngine on Linux + NVIDIA. A node only
-// ever receives specs matching a RunnerKind it advertised.
+// Manager brings up deployments and streams their lifecycle. Interface (like
+// runner.Runner) so tests use a fake instead of a real engine, a real download,
+// or a real GPU.
 //
-// Implementation plan (Phase 2) — NativeEngine (primary):
-//     - resolve spec.Native.ModelFile in ModelRef@Revision; download to
-//       ~/.gridlink/models/ if absent (state PULLING, report
-//       progress_percent; weights are GB-scale on consumer uplinks)
-//     - verify SHA-256 against spec.Native.Sha256 BEFORE loading; mismatch
-//       is FAILED, never a load attempt
-//     - spawn the agent binary as `agent engine` under sandbox-exec, bound to
-//       a free localhost port; state LOADING
-//     - warm the engine once at agent startup: the first-ever Metal shader
-//       compile costs ~6.5s, ~0.01s cached thereafter
-//     - poll GET 127.0.0.1:<hostPort>/v1/models -> READY
-//     - engine process exits or health fails 3x -> FAILED with its stderr tail
+// Stopping is by context cancellation, exactly as with jobs: the coordinator's
+// StopDeployment cancels the deployment's context, and the Manager must then
+// tear the engine down and emit STOPPED before closing the channel.
+type Manager interface {
+	// Start brings up the deployment and streams Updates until a terminal
+	// state (FAILED / STOPPED), then closes the channel. READY is NOT
+	// terminal — a healthy deployment sits in READY until stopped.
+	// Cancelling ctx must tear down the engine and emit STOPPED.
+	Start(ctx context.Context, spec *computev1.DeploymentSpec) (<-chan Update, error)
+}
+
+// Implementation plan (Phase 2) — NativeEngine (primary, macOS):
+//   - resolve spec.Native.ModelFile in ModelRef@Revision; download to
+//     ~/.gridlink/models/ if absent (state PULLING, report Progress; weights
+//     are GB-scale on consumer uplinks)
+//   - verify SHA-256 against spec.Native.Sha256 BEFORE loading; a mismatch is
+//     FAILED, never a load attempt
+//   - spawn the agent binary as `agent engine` under sandbox-exec, bound to a
+//     free localhost port; state LOADING
+//   - warm the engine once at agent startup: the first-ever Metal shader
+//     compile costs ~6.5s, ~0.01s cached thereafter
+//   - poll GET 127.0.0.1:<hostPort>/v1/models -> READY
+//   - engine process exits or health fails 3x -> FAILED with its stderr tail
+//   - report Metal's recommendedMaxWorkingSetSize back as
+//     GpuInfo.usable_vram_mb; the engine has cgo, the detector does not
 //
 // Implementation plan (Phase 2) — ContainerEngine (Linux + NVIDIA only):
-//     - pull spec.Container.Image (state PULLING)
-//     - pick a free host port; publish hostPort -> spec.Container.ContainerPort,
-//       GPU access, restart policy "no" (the COORDINATOR owns restarts and
-//       re-placement, not Docker)
-//     - vLLM args: ["--model", spec.Container.ModelRef,
-//                   "--served-model-name", spec.ServedModelName] + ExtraArgs
-//     - mount a persistent named volume at /root/.cache/huggingface so
-//       weights survive container restarts (NOT a host bind mount)
-//
-//   Stop(deploymentID): stop the engine subprocess (or container, 30s grace)
-//     and remove; state STOPPED.
-//   List(): active deployment IDs, for Heartbeat.active_deployment_ids.
-//
-// Client wiring (client.go): handle StartDeployment / StopDeployment from
-// the stream; forward Updates as DeploymentUpdate messages; include
-// List() + data-plane addr (tailnet IP via `tailscale ip -4`, or
-// GRIDLINK_DATA_ADDR override) in every Heartbeat.
-type Manager struct {
-	log *slog.Logger
-	// TODO(claude): docker client, active map
-}
-
-func New(log *slog.Logger) (*Manager, error) {
-	panic("not implemented")
-}
+//   - pull spec.Container.Image (state PULLING)
+//   - pick a free host port; publish hostPort -> spec.Container.ContainerPort,
+//     GPU access, restart policy "no" (the COORDINATOR owns restarts and
+//     re-placement, not Docker)
+//   - vLLM args: ["--model", spec.Container.ModelRef,
+//     "--served-model-name", spec.ServedModelName] + ExtraArgs
+//   - mount a persistent named volume at /root/.cache/huggingface so weights
+//     survive container restarts (NOT a host bind mount)
