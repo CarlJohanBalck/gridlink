@@ -153,11 +153,11 @@ was shaped for.
 
 ## Open items that need you, not code
 
-- **Apple Developer enrollment ($99/yr).** This is the hard blocker for the
-  whole distribution story and it is calendar time, not work time. An
-  unnotarized binary carrying a quarantine xattr was **SIGKILLed (exit 137)**
-  with no output; `spctl` returned `rejected`. Start enrollment before the
-  engine work lands, or there is nothing to ship it in.
+- **Apple Developer enrollment ($99/yr) is OPTIONAL, not a blocker.** Earlier
+  notes here overstated it. Gatekeeper only kills binaries carrying the
+  quarantine attribute, which browsers set and `curl`/`brew`/`scp` do not —
+  verified on this machine. A terminal install therefore runs unsigned.
+  Signing only buys a warning-free double-clickable app from a web page.
 - **No token accounting yet.** The engine does not report prompt/completion
   token counts, which Phase 2's definition of done requires for usage JSONL.
   llama.cpp knows them; they need plumbing through `engine.Token` and the

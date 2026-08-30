@@ -57,18 +57,28 @@ via cgo drove Metal with no installed dependencies.
 - **`sandbox-exec` is viable.** Metal works under a `(deny default)` profile
   given `iokit-open`, `mach-lookup`, `file-read*` and a writable scratch
   subpath — full speed, GPU still `MTL0 (Apple M4)`.
-- **Gatekeeper will kill an unnotarized agent.** With a quarantine xattr set,
-  the ad-hoc-signed binary was **SIGKILLed (exit 137)** with no output at all,
-  and `spctl -a` returned `rejected`. This is silent and total: not a warning
-  dialog, not a degraded mode. Notarization is a hard prerequisite for any
-  download-based install, not a polish step.
+- **Gatekeeper kills an unnotarized agent ONLY when the file is quarantined.**
+  With a quarantine xattr set, the ad-hoc-signed binary was **SIGKILLed
+  (exit 137)** with no output, and `spctl -a` returned `rejected`. But the
+  quarantine attribute is applied by browsers and LaunchServices — **not** by
+  `curl`, `brew`, or `scp`. Verified: a curl-downloaded copy of the agent has
+  no quarantine attribute and runs unsigned. So notarization gates a
+  double-clickable .app/.dmg from a web page; it does NOT gate a terminal
+  install (`curl ... | sh`, Homebrew), which is how this ships.
 
 ## Distribution decision
 
-The agent must be **Developer ID signed and notarized**. An ad-hoc signed
-binary is quarantined by Gatekeeper on any Mac that downloads it, so without
-notarization there is no zero-install story at all. Start enrollment early —
-it is calendar time, not work time. Simulate a downloaded provider with
+Ship as a **terminal install** (`curl -fsSL <url>/install.sh | sh`, and later
+a Homebrew formula). Terminal downloads do not carry the quarantine
+attribute, so an unsigned binary runs fine and no Apple Developer
+subscription is required.
+
+Developer ID signing + notarization ($99/yr) buys a double-clickable app
+downloaded from a web page without warnings. That is a polish decision for
+when there are users to polish for, not a prerequisite. Revisit it if
+providers turn out to need a GUI installer.
+
+To test the quarantined path anyway:
 `xattr -w com.apple.quarantine "0081;0;GridLink;" ./agent`.
 
 ## Data plane transport decision
