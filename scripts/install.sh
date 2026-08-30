@@ -14,7 +14,7 @@
 # double-clickable app downloaded in a browser.
 set -eu
 
-BASE_URL="${GRIDLINK_BASE_URL:-https://github.com/carljohanbalck/gridlink/releases/latest/download}"
+BASE_URL="${GRIDLINK_BASE_URL:-https://github.com/CarlJohanBalck/gridlink/releases/latest/download}"
 INSTALL_DIR="${GRIDLINK_INSTALL_DIR:-$HOME/.local/bin}"
 BIN_NAME="gridlink-agent"
 

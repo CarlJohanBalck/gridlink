@@ -17,7 +17,7 @@ spec and measured engine-spike results.
 ## Install (providers)
 
 ```sh
-curl -fsSL https://<host>/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/CarlJohanBalck/gridlink/main/scripts/install.sh | sh
 ```
 
 Installs a single binary to `~/.local/bin`. No sudo, no Docker, no Python, no
@@ -25,9 +25,17 @@ Homebrew — the agent carries its own inference engine. Apple Silicon Macs get
 GPU inference; the Linux builds are container-job only for now.
 
 No code signing is required: files fetched with `curl` carry no macOS
-quarantine attribute, so the unsigned binary runs. `make release` produces the
-binaries and a `SHA256SUMS` the installer verifies against, refusing to
-install on a mismatch.
+quarantine attribute, so the unsigned binary runs. The installer verifies the
+download against the release's `SHA256SUMS` and refuses to install on a
+mismatch.
+
+Releases are built by `.github/workflows/release.yml` on an Apple Silicon
+runner (the Mac binary links llama.cpp, so it cannot be cross-compiled). Cut
+one with:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
 
 ## Try it on one Mac
 

@@ -1,0 +1,71 @@
+name: release
+
+# Publishes the provider binaries that scripts/install.sh downloads.
+#
+# Runs on macOS Apple Silicon because the Mac agent links llama.cpp via cgo and
+# must be built on the target architecture. The Linux binaries are pure Go
+# (CGO_ENABLED=0), so they cross-compile from the same runner.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write # required to create the release
+
+jobs:
+  release:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      # llama.cpp takes several minutes to build. It is pinned to a commit in
+      # fetch-llama.sh, so that file's hash is a correct cache key: bumping the
+      # pin invalidates the cache, and nothing else does.
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: agent/internal/engine/third_party/llama.cpp
+          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-llama.sh') }}
+
+      - name: Build the Metal engine
+        run: make engine
+
+      # Never publish binaries that have not passed the suite.
+      - name: Test
+        run: make test
+
+      - name: Build release artifacts
+        run: make release
+
+      - name: Verify checksums
+        working-directory: dist
+        run: shasum -a 256 -c SHA256SUMS
+
+      # The macOS binary must run on the runner, or the release ships something
+      # that cannot start. This catches a broken cgo link that `go build`
+      # alone would not.
+      - name: Smoke-test the macOS binary
+        run: ./dist/gridlink-agent-darwin-arm64 engine 2>&1 | head -1
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            dist/gridlink-agent-darwin-arm64 \
+            dist/gridlink-agent-linux-arm64 \
+            dist/gridlink-agent-linux-amd64 \
+            dist/SHA256SUMS
