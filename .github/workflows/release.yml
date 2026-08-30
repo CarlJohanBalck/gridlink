@@ -37,6 +37,21 @@ jobs:
           path: agent/internal/engine/third_party/llama.cpp
           key: llama-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/fetch-llama.sh') }}
 
+      # contracts/gen is generated, not committed, so a fresh checkout has no
+      # Go code to build until this runs. buf.gen.yaml uses remote plugins, so
+      # buf itself is the only tool needed. Pinned to match local development.
+      - name: Install buf
+        env:
+          BUF_VERSION: 1.71.0
+        run: |
+          curl -fsSL -o /usr/local/bin/buf \
+            "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-$(uname -s)-$(uname -m)"
+          chmod +x /usr/local/bin/buf
+          buf --version
+
+      - name: Generate protobuf code
+        run: make proto
+
       - name: Build the Metal engine
         run: make engine
 
