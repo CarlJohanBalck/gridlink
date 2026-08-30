@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-30**, branch `main`, HEAD `cadfed6`, working tree clean.
+Last updated: **2026-08-30**, branch `main`, HEAD `b49ee72`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -137,7 +137,12 @@ HOME=/tmp/node2 GRIDLINK_TOKEN=... GRIDLINK_DATA_ADDR=127.0.0.1 ./bin/agent
 
 Phase 2 is functionally complete. What remains before calling it shipped:
 
-1. **Notarization** (see below) — still the hard blocker for real providers.
+1. ~~Notarization~~ — **done differently**: `scripts/install.sh` ships the
+   agent as a terminal install, which needs no Apple account (see the
+   corrected note below). `make release` builds the artifacts and a
+   SHA256SUMS the installer verifies. What is still missing is somewhere to
+   publish them: the installer points at a GitHub releases URL that does not
+   exist yet.
 2. **Tailscale end-to-end.** Everything so far ran with
    `GRIDLINK_DATA_ADDR=127.0.0.1` on one machine. The tailnet path
    (`dialer.Direct` to a tailnet IP) has never been exercised across two
@@ -153,6 +158,10 @@ was shaped for.
 
 ## Open items that need you, not code
 
+- **Publish the release artifacts.** `make release` produces them and
+  `scripts/install.sh` expects them at `GRIDLINK_BASE_URL`, but nothing is
+  hosted yet, so the documented curl command does not work for anyone else.
+  Tested end to end against a local HTTP server.
 - **Apple Developer enrollment ($99/yr) is OPTIONAL, not a blocker.** Earlier
   notes here overstated it. Gatekeeper only kills binaries carrying the
   quarantine attribute, which browsers set and `curl`/`brew`/`scp` do not —
