@@ -1,13 +1,18 @@
 # GridLink
 
 Distributed GPU compute platform: personal computers contribute GPU power via
-a lightweight agent; a coordinator schedules containerized AI workloads onto
-them. Later phases add inference endpoints, metering, and payouts.
+a lightweight agent; a coordinator places AI models onto them and an
+OpenAI-compatible gateway routes inference to whichever node is serving.
+Apple Silicon Macs run models natively on Metal, installing nothing.
 
-**Status: Phase 1 complete**, starting Phase 2 (inference on Apple Silicon
-providers). See `docs/STATUS.md` for where things stand and what's next,
-`CLAUDE.md` for architecture decisions and conventions, and `docs/PHASE2.md`
-for the Phase 2 spec and measured engine-spike results.
+**Status: Phase 2 functionally complete** — a request goes client → gateway →
+node → Metal engine and back, metered, and a deployment re-places itself when
+a node dies. Not yet shippable to real providers: the binary needs Apple
+notarization, and the cross-machine (tailnet) path is untested.
+
+See `docs/STATUS.md` for where things stand and what is next, `CLAUDE.md` for
+architecture decisions and conventions, and `docs/PHASE2.md` for the Phase 2
+spec and measured engine-spike results.
 
 ## Try it on one Mac
 
