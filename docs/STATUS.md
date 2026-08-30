@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-14**, branch `main`, HEAD `82351f0`, working tree clean.
+Last updated: **2026-08-30**, branch `main`, HEAD `82351f0`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -134,10 +134,6 @@ small, and the gateway's usage capture has nothing to read otherwise.
   unnotarized binary carrying a quarantine xattr was **SIGKILLed (exit 137)**
   with no output; `spctl` returned `rejected`. Start enrollment before the
   engine work lands, or there is nothing to ship it in.
-- **`NodeSummary` does not expose `SystemInfo`**, so `ListNodes` cannot show a
-  node's runners, RAM, or `usable_vram_mb` — only the coordinator's
-  registration log does. Worth adding in session 4, since placement decisions
-  will be impossible to debug from the outside otherwise.
 - **No token accounting yet.** The engine does not report prompt/completion
   token counts, which Phase 2's definition of done requires for usage JSONL.
   llama.cpp knows them; they need plumbing through `engine.Token` and the
