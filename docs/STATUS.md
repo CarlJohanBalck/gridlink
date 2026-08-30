@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-30**, branch `main`, HEAD `82351f0`, working tree clean.
+Last updated: **2026-08-30**, branch `main`, HEAD `cadfed6`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -104,28 +104,52 @@ heartbeat, and stops it).
 - `ResolveModel` returns only READY replicas that have a data-plane address.
 - `ReportUsage` appends JSONL to `$GRIDLINK_USAGE_LOG`.
 
-## Next: Phase 2, session 5 — the gateway
+**Session 5 (the gateway) is done** — `cadfed6`. **Phase 2's definition of
+done is met.** A request now goes client → gateway → node → Metal engine and
+back, metered:
 
-`gateway/` is still all stubs. This is the last piece of the Phase 2
-definition of done.
+```bash
+GRIDLINK_API_KEYS=sk-1 GRIDLINK_GATEWAY_LISTEN=:8099 ./bin/gateway
+curl -H "Authorization: Bearer sk-1" localhost:8099/v1/models
+curl -H "Authorization: Bearer sk-1" localhost:8099/v1/chat/completions -d '{...}'
+```
 
-1. **`internal/router`**: resolve a model name to replicas via
-   `GatewayService.ResolveModel`, with a short cache — resolving per request
-   makes the coordinator a hot path.
-2. **`internal/proxy`**: OpenAI-compatible front door (`/v1/models`,
-   `/v1/chat/completions`), API-key auth, and SSE passthrough that streams
-   through rather than buffering.
-3. **`internal/dialer`**: the transport seam. Tailscale now (dial
-   `<tailnet-ip>:<port>` directly), reverse tunnel later. Nothing outside
-   this package may know which is in use.
-4. **`internal/usage`**: capture token counts per request and report them
-   asynchronously, so a slow coordinator cannot stall a response.
+- Token counts come from the tokenizer, identical streaming and not
+  (11/9/20 for the same prompt), and land in `$GRIDLINK_USAGE_LOG` as JSONL
+  with the calling key's ID.
+- SSE streams through unbuffered (`FlushInterval=-1`); usage is scraped in
+  passing rather than by reading the response.
+- 401 without a valid key, 404 for an unknown model, 503 for a deployed model
+  with no READY replica, 502 after a failed retry on another replica.
+- **Node loss verified live**: killed the node hosting a deployment, the
+  reconciler re-placed it on a second node, and inference resumed with no
+  operator action.
 
-**Blocked on one thing:** the engine does not yet return token counts, and
-the DoD requires correct prompt/completion counts for both streaming and
-non-streaming. llama.cpp knows them; they need plumbing through
-`engine.Token` into the chat response's `usage` field. Do that first — it is
-small, and the gateway's usage capture has nothing to read otherwise.
+Two nodes on one Mac, for testing re-placement without a second machine:
+
+```bash
+mkdir -p /tmp/node2/.gridlink/models
+ln -f ~/.gridlink/models/*.gguf /tmp/node2/.gridlink/models/   # skip re-download
+HOME=/tmp/node2 GRIDLINK_TOKEN=... GRIDLINK_DATA_ADDR=127.0.0.1 ./bin/agent
+```
+
+## Next
+
+Phase 2 is functionally complete. What remains before calling it shipped:
+
+1. **Notarization** (see below) — still the hard blocker for real providers.
+2. **Tailscale end-to-end.** Everything so far ran with
+   `GRIDLINK_DATA_ADDR=127.0.0.1` on one machine. The tailnet path
+   (`dialer.Direct` to a tailnet IP) has never been exercised across two
+   real machines.
+3. **`/v1/completions` is routed but unimplemented by the native engine** —
+   it forwards and 404s. Either implement it or stop advertising the route.
+4. **The gateway is a single point of failure** and holds request bodies in
+   memory (8 MiB cap) to allow retries. Fine at this scale; worth revisiting
+   before real traffic.
+
+Then Phase 3: metering + ledger (Postgres), which is what the usage JSONL
+was shaped for.
 
 ## Open items that need you, not code
 
