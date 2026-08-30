@@ -6,3 +6,6 @@ contracts/gen/
 
 # llama.cpp is fetched+built by scripts/fetch-llama.sh, not vendored
 agent/internal/engine/third_party/
+
+# release artifacts (built by `make release`)
+dist/

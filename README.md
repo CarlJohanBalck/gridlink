@@ -14,6 +14,21 @@ See `docs/STATUS.md` for where things stand and what is next, `CLAUDE.md` for
 architecture decisions and conventions, and `docs/PHASE2.md` for the Phase 2
 spec and measured engine-spike results.
 
+## Install (providers)
+
+```sh
+curl -fsSL https://<host>/install.sh | sh
+```
+
+Installs a single binary to `~/.local/bin`. No sudo, no Docker, no Python, no
+Homebrew — the agent carries its own inference engine. Apple Silicon Macs get
+GPU inference; the Linux builds are container-job only for now.
+
+No code signing is required: files fetched with `curl` carry no macOS
+quarantine attribute, so the unsigned binary runs. `make release` produces the
+binaries and a `SHA256SUMS` the installer verifies against, refusing to
+install on a mismatch.
+
 ## Try it on one Mac
 
 Requires an Apple Silicon Mac. `make engine` fetches and builds llama.cpp

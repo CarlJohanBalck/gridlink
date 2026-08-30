@@ -1,4 +1,4 @@
-.PHONY: proto build build-linux-arm64 engine engine-check test run-coord run-agent lint
+.PHONY: proto build build-linux-arm64 engine engine-check release test run-coord run-agent lint
 
 LLAMA_LIB := agent/internal/engine/third_party/llama.cpp/build/src/libllama.a
 
@@ -25,6 +25,24 @@ build-linux-arm64: ## cross-compile for linux/arm64 providers (e.g. Raspberry Pi
 	mkdir -p bin
 	cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../bin/agent-linux-arm64 ./cmd/agent
 	cd coordinator && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../bin/coordinator-linux-arm64 ./cmd/coordinator
+
+# release builds the agent binaries providers download, plus the checksum list
+# scripts/install.sh verifies against.
+#
+# Only the host platform's GPU build can be produced here: the macOS agent
+# links llama.cpp via cgo, so it must be built ON an Apple Silicon Mac. The
+# linux binaries are pure Go (CGO_ENABLED=0) and therefore have NO inference
+# engine -- they can run container jobs only, not GPU inference.
+release: engine-check
+	rm -rf dist && mkdir -p dist
+ifeq ($(shell uname -s),Darwin)
+	cd agent && go build -o ../dist/gridlink-agent-darwin-arm64 ./cmd/agent
+endif
+	cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../dist/gridlink-agent-linux-arm64 ./cmd/agent
+	cd agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../dist/gridlink-agent-linux-amd64 ./cmd/agent
+	cd dist && shasum -a 256 gridlink-agent-* > SHA256SUMS
+	@echo "--> dist/"
+	@ls -1 dist
 
 test:
 	cd contracts && go test ./...
