@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-14**, branch `main`, HEAD `c5a6a98`, working tree clean.
+Last updated: **2026-08-14**, branch `main`, HEAD `82351f0`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -77,27 +77,55 @@ GRIDLINK_TEST_MODEL=$S/qwen0.5b.gguf GRIDLINK_TEST_AGENT_BIN=$PWD/bin/agent \
   go test ./internal/deploy/ -run TestManualNativeDeployment -v
 ```
 
-## Next: Phase 2, session 4 — coordinator placement
+**Session 4 (coordinator placement) is done** — `82351f0`. A deployment now
+runs end to end from the admin API:
 
-The agent side is complete; nothing can drive it yet. `AdminService.CreateDeployment`
-and `coordinator/internal/deployments` are still stubs, so a deployment can
-only be started from a Go test.
+```bash
+grpcurl ... AdminService/CreateDeployment   # -> deployment_id
+grpcurl ... AdminService/ListDeployments    # PULLING -> LOADING -> READY
+grpcurl ... GatewayService/ResolveModel     # -> {node_id, deployment_id, addr}
+curl $addr/v1/chat/completions              # real tokens
+grpcurl ... AdminService/DeleteDeployment   # engine subprocess exits
+```
 
-1. **Implement the deployments store + reconciler** in
-   `coordinator/internal/deployments`: desired state, placement onto an ONLINE
-   node whose `SystemInfo.runners` includes the spec's engine kind and whose
-   `GpuInfo.usable_vram_mb` >= `min_vram_mb` (never `vram_total_mb`; and 0
-   means unknown, so refuse to place).
-2. **Wire `CreateDeployment` / `DeleteDeployment` / `ListDeployments`** on
-   AdminService, and route `StartDeployment` / `StopDeployment` down the
-   existing agent stream.
-3. **Consume `DeploymentUpdate`** and `Heartbeat.active_deployment_ids` to
-   reconcile after a coordinator restart — re-sending StartDeployment for a
-   deployment the agent already runs is expected and already ignored agent-side.
-4. **Re-place on node loss**, which is the actual product: consumer nodes
-   disappear constantly.
+Verified live on the M4, including a real Hugging Face download with SHA-256
+verification, and coordinator-restart reconciliation (the restarted process
+has an empty table, spots the still-running deployment from the next
+heartbeat, and stops it).
 
-Then session 5 is the gateway.
+- Placement matches `spec.engine` against `SystemInfo.runners` and sizes
+  against `usable_vram_mb`; `0` refuses rather than guessing.
+- A refusal names why each node was skipped, and `ListNodes` now returns
+  `SystemInfo` plus `deployment_ids`.
+- Unplaced deployments are retried by the reconciler, so creating one before
+  any node connects is fine.
+- A lost or FAILED replica is re-placed after a 60s grace window, onto a
+  *different* node (the failed one is skipped for 10 min).
+- `ResolveModel` returns only READY replicas that have a data-plane address.
+- `ReportUsage` appends JSONL to `$GRIDLINK_USAGE_LOG`.
+
+## Next: Phase 2, session 5 — the gateway
+
+`gateway/` is still all stubs. This is the last piece of the Phase 2
+definition of done.
+
+1. **`internal/router`**: resolve a model name to replicas via
+   `GatewayService.ResolveModel`, with a short cache — resolving per request
+   makes the coordinator a hot path.
+2. **`internal/proxy`**: OpenAI-compatible front door (`/v1/models`,
+   `/v1/chat/completions`), API-key auth, and SSE passthrough that streams
+   through rather than buffering.
+3. **`internal/dialer`**: the transport seam. Tailscale now (dial
+   `<tailnet-ip>:<port>` directly), reverse tunnel later. Nothing outside
+   this package may know which is in use.
+4. **`internal/usage`**: capture token counts per request and report them
+   asynchronously, so a slow coordinator cannot stall a response.
+
+**Blocked on one thing:** the engine does not yet return token counts, and
+the DoD requires correct prompt/completion counts for both streaming and
+non-streaming. llama.cpp knows them; they need plumbing through
+`engine.Token` into the chat response's `usage` field. Do that first — it is
+small, and the gateway's usage capture has nothing to read otherwise.
 
 ## Open items that need you, not code
 
@@ -113,7 +141,10 @@ Then session 5 is the gateway.
 - **No token accounting yet.** The engine does not report prompt/completion
   token counts, which Phase 2's definition of done requires for usage JSONL.
   llama.cpp knows them; they need plumbing through `engine.Token` and the
-  chat response's `usage` field.
+  chat response's `usage` field. This now blocks the gateway.
+- **Agent startup costs ~9s on a cold Metal cache**, because `GPUStats()`
+  initialises the backend and compiles shaders. Subsequent starts are
+  instant. It delays first registration, so do not mistake it for a hang.
 - **Engine concurrency is one request at a time**, serialized by a mutex. That
   is correct for one llama.cpp context, but it means a slow generation blocks
   the next request rather than queueing with any fairness. Fine for now; worth
