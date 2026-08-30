@@ -1,6 +1,6 @@
 // Command gateway is the OpenAI-compatible inference front door. It routes
-// /v1/* requests to READY vLLM replicas on provider nodes, streams SSE
-// through untouched, and reports token usage to the coordinator.
+// /v1/* requests to READY replicas on provider nodes, streams SSE through
+// untouched, and reports token usage to the coordinator.
 package main
 
 import (
@@ -34,21 +34,25 @@ func main() {
 	// Phase 2b: swap for a reverse-tunnel dialer without touching router/proxy.
 	d := dialer.NewDirect()
 
-	// TODO(claude): router.New — gRPC client to coordinator GatewayService,
-	// ResolveModel with a small TTL cache (2s) + round-robin across replicas.
 	r := router.New(coordAddr, token, logger)
+	defer r.Close()
 
-	// TODO(claude): usage.NewReporter — batches ReportUsage calls, drops on
-	// overflow rather than blocking the request path.
 	u := usage.NewReporter(coordAddr, token, logger)
+	// Closed before the router so queued usage is flushed while the
+	// coordinator connection is still up.
+	defer u.Close()
 
-	// TODO(claude): proxy.Serve — the HTTP server. See package doc for plan.
+	keys := proxy.KeysFromEnv("GRIDLINK_API_KEYS")
+	if len(keys) == 0 {
+		logger.Warn("GRIDLINK_API_KEYS is empty: the gateway will accept unauthenticated requests")
+	}
+
 	if err := proxy.Serve(ctx, proxy.Config{
 		Addr:    httpAddr,
 		Router:  r,
 		Dialer:  d,
 		Usage:   u,
-		APIKeys: proxy.KeysFromEnv("GRIDLINK_API_KEYS"), // "key1,key2" Phase 2
+		APIKeys: keys, // "key1,key2" Phase 2
 		Logger:  logger,
 	}); err != nil && ctx.Err() == nil {
 		logger.Error("gateway exited with error", "err", err)

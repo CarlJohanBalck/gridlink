@@ -312,6 +312,14 @@ func (s *gatewayServer) ResolveModel(_ context.Context, req *computev1.ResolveMo
 	}, nil
 }
 
+func (s *gatewayServer) ListModels(_ context.Context, req *computev1.ListModelsRequest) (*computev1.ListModelsResponse, error) {
+	names := s.deploy.ServableModels()
+	if req.GetIncludeUnready() {
+		names = s.deploy.DeployedModels()
+	}
+	return &computev1.ListModelsResponse{ServedModelNames: names}, nil
+}
+
 // ReportUsage appends one JSONL record per request. Phase 2 only logs; Phase 3
 // turns this into the ledger feed, so the record shape is the thing that has
 // to be right, not the sink.

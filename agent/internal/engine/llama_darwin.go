@@ -155,7 +155,8 @@ func (m *llamaModel) generate(ctx context.Context, req GenerateRequest, tokens [
 
 	batch := C.llama_batch_get_one((*C.llama_token)(unsafe.Pointer(&tokens[0])), C.int32_t(len(tokens)))
 	if rc := C.llama_decode(m.ctx, batch); rc != 0 {
-		out <- Token{Done: true, Err: fmt.Errorf("prefill decode failed: %d", rc)}
+		out <- Token{Done: true, PromptTokens: len(tokens),
+			Err: fmt.Errorf("prefill decode failed: %d", rc)}
 		return
 	}
 
@@ -164,25 +165,35 @@ func (m *llamaModel) generate(ctx context.Context, req GenerateRequest, tokens [
 		maxTokens = 512
 	}
 
+	// finish stamps token counts onto the terminal Token so every exit path
+	// reports usage; a path that forgets would silently bill nothing.
+	generated := 0
+	finish := func(t Token) Token {
+		t.Done = true
+		t.PromptTokens = len(tokens)
+		t.CompletionTokens = generated
+		return t
+	}
+
 	var sb strings.Builder
 	buf := make([]C.char, 256)
 	for i := 0; i < maxTokens; i++ {
 		select {
 		case <-ctx.Done():
-			out <- Token{Done: true, Reason: "stop", Err: ctx.Err()}
+			out <- finish(Token{Reason: "stop", Err: ctx.Err()})
 			return
 		default:
 		}
 
 		id := C.llama_sampler_sample(smpl, m.ctx, -1)
 		if C.llama_vocab_is_eog(m.vocab, id) {
-			out <- Token{Done: true, Reason: "stop"}
+			out <- finish(Token{Reason: "stop"})
 			return
 		}
 
 		n := C.llama_token_to_piece(m.vocab, id, &buf[0], C.int32_t(len(buf)), 0, true)
 		if n < 0 {
-			out <- Token{Done: true, Err: fmt.Errorf("token_to_piece failed: %d", n)}
+			out <- finish(Token{Err: fmt.Errorf("token_to_piece failed: %d", n)})
 			return
 		}
 		piece := C.GoStringN(&buf[0], n)
@@ -193,23 +204,26 @@ func (m *llamaModel) generate(ctx context.Context, req GenerateRequest, tokens [
 		emitted := sb.Len()
 		sb.WriteString(piece)
 		if idx := indexAnyStop(sb.String(), req.Stop); idx >= 0 {
+			// The stop sequence itself was generated, so it counts.
+			generated++
 			if idx > emitted {
 				out <- Token{Text: sb.String()[emitted:idx]}
 			}
-			out <- Token{Done: true, Reason: "stop"}
+			out <- finish(Token{Reason: "stop"})
 			return
 		}
 
+		generated++
 		out <- Token{Text: piece}
 
 		one := []C.llama_token{id}
 		b := C.llama_batch_get_one((*C.llama_token)(unsafe.Pointer(&one[0])), 1)
 		if rc := C.llama_decode(m.ctx, b); rc != 0 {
-			out <- Token{Done: true, Err: fmt.Errorf("decode failed: %d", rc)}
+			out <- finish(Token{Err: fmt.Errorf("decode failed: %d", rc)})
 			return
 		}
 	}
-	out <- Token{Done: true, Reason: "length"}
+	out <- finish(Token{Reason: "length"})
 }
 
 // ApplyChatTemplate renders messages with the GGUF's own chat template.

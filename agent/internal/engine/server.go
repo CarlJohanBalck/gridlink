@@ -113,6 +113,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, req Genera
 
 	var sb strings.Builder
 	finish := "stop"
+	var u usage
 	for tok := range ch {
 		if tok.Err != nil {
 			// Headers are unwritten until now, so a mid-generation failure can
@@ -121,8 +122,11 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, req Genera
 			return
 		}
 		sb.WriteString(tok.Text)
-		if tok.Done && tok.Reason != "" {
-			finish = tok.Reason
+		if tok.Done {
+			if tok.Reason != "" {
+				finish = tok.Reason
+			}
+			u = usageOf(tok)
 		}
 	}
 
@@ -136,6 +140,7 @@ func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, req Genera
 			Message:      &chatMessage{Role: "assistant", Content: sb.String()},
 			FinishReason: finish,
 		}},
+		Usage: &u,
 	})
 }
 
@@ -170,6 +175,7 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req Generate
 	})
 
 	finish := "stop"
+	var u usage
 	for tok := range ch {
 		if tok.Err != nil {
 			// The 200 is already sent, so the only honest signal left is to
@@ -183,14 +189,25 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req Generate
 				Choices: []streamChoice{{Index: 0, Delta: &chatMessage{Content: tok.Text}}},
 			})
 		}
-		if tok.Done && tok.Reason != "" {
-			finish = tok.Reason
+		if tok.Done {
+			if tok.Reason != "" {
+				finish = tok.Reason
+			}
+			u = usageOf(tok)
 		}
 	}
 
 	s.sendChunk(w, flusher, streamChunk{
 		ID: id, Object: "chat.completion.chunk", Created: created, Model: s.modelName,
 		Choices: []streamChoice{{Index: 0, Delta: &chatMessage{}, FinishReason: &finish}},
+	})
+	// Usage rides on its own final chunk, as the OpenAI streaming API does.
+	// It is always sent rather than gated behind stream_options.include_usage:
+	// the gateway meters every request, and a client that forgot the flag
+	// would silently bill nothing.
+	s.sendChunk(w, flusher, streamChunk{
+		ID: id, Object: "chat.completion.chunk", Created: created, Model: s.modelName,
+		Choices: []streamChoice{}, Usage: &u,
 	})
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
@@ -255,6 +272,23 @@ type chatResponse struct {
 	Created int64        `json:"created"`
 	Model   string       `json:"model"`
 	Choices []chatChoice `json:"choices"`
+	Usage   *usage       `json:"usage,omitempty"`
+}
+
+// usage is the OpenAI token accounting block. Phase 3 bills on these, so they
+// come from the tokenizer, never from estimating.
+type usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+}
+
+func usageOf(t Token) usage {
+	return usage{
+		PromptTokens:     t.PromptTokens,
+		CompletionTokens: t.CompletionTokens,
+		TotalTokens:      t.PromptTokens + t.CompletionTokens,
+	}
 }
 
 type streamChoice struct {
@@ -269,6 +303,7 @@ type streamChunk struct {
 	Created int64          `json:"created"`
 	Model   string         `json:"model"`
 	Choices []streamChoice `json:"choices"`
+	Usage   *usage         `json:"usage,omitempty"`
 }
 
 type modelInfo struct {

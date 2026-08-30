@@ -30,6 +30,10 @@ service AdminService {
 service GatewayService {
   rpc ResolveModel(ResolveModelRequest) returns (ResolveModelResponse);
   rpc ReportUsage(ReportUsageRequest) returns (ReportUsageResponse);
+  // Backs the gateway's /v1/models. Separate from AdminService.ListDeployments
+  // so the gateway needs no admin surface: it sees servable model names, not
+  // the placement table.
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
 }
 
 // ---- agent -> coordinator ----
@@ -209,3 +213,18 @@ message ReportUsageRequest {
 }
 
 message ReportUsageResponse {}
+
+message ListModelsRequest {
+  // When true, include models that are deployed but have no READY replica
+  // right now (e.g. mid re-placement after a node died). The gateway uses
+  // this to answer 503 "try again" instead of 404 "no such model", which
+  // would tell a client to stop retrying during a transient outage.
+  bool include_unready = 1;
+}
+
+message ListModelsResponse {
+  // Model names with at least one READY, routable replica. A model that is
+  // still loading is deliberately absent: advertising it would invite
+  // requests that cannot be served.
+  repeated string served_model_names = 1;
+}

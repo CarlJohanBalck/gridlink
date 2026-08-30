@@ -41,6 +41,11 @@ type Token struct {
 	// Reason is set when Done: "stop" (EOG or stop sequence) or "length".
 	Reason string
 	Err    error
+	// PromptTokens and CompletionTokens are set only on the final Token.
+	// These are what Phase 3 bills on, so they come from the tokenizer rather
+	// than from counting words in the output.
+	PromptTokens     int
+	CompletionTokens int
 }
 
 // ChatMessage is one turn in a chat request.

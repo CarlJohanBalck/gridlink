@@ -85,7 +85,7 @@ func TestChatCompletionNonStreaming(t *testing.T) {
 	m := &fakeModel{tokens: []Token{
 		{Text: "Hello"},
 		{Text: " world"},
-		{Done: true, Reason: "stop"},
+		{Done: true, Reason: "stop", PromptTokens: 11, CompletionTokens: 2},
 	}}
 	srv := newTestServer(t, m)
 
@@ -118,13 +118,23 @@ func TestChatCompletionNonStreaming(t *testing.T) {
 	if m.gotReq.MaxTokens != 16 {
 		t.Errorf("max_tokens not forwarded: %d", m.gotReq.MaxTokens)
 	}
+	// Usage is billing data in Phase 3, so it must be present and consistent.
+	if got.Usage == nil {
+		t.Fatal("response carried no usage block")
+	}
+	if got.Usage.PromptTokens != 11 || got.Usage.CompletionTokens != 2 {
+		t.Errorf("usage = %+v, want prompt=11 completion=2", got.Usage)
+	}
+	if got.Usage.TotalTokens != 13 {
+		t.Errorf("total_tokens = %d, want 13", got.Usage.TotalTokens)
+	}
 }
 
 func TestChatCompletionStreaming(t *testing.T) {
 	m := &fakeModel{tokens: []Token{
 		{Text: "one"},
 		{Text: "two"},
-		{Done: true, Reason: "length"},
+		{Done: true, Reason: "length", PromptTokens: 7, CompletionTokens: 2},
 	}}
 	srv := newTestServer(t, m)
 
@@ -151,6 +161,7 @@ func TestChatCompletionStreaming(t *testing.T) {
 	var content strings.Builder
 	var sawRole bool
 	var finish string
+	var streamUsage *usage
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimPrefix(line, "data: ")
 		if line == "" || line == "[DONE]" {
@@ -162,6 +173,9 @@ func TestChatCompletionStreaming(t *testing.T) {
 		}
 		if chunk.Object != "chat.completion.chunk" {
 			t.Errorf("object = %q, want chat.completion.chunk", chunk.Object)
+		}
+		if chunk.Usage != nil {
+			streamUsage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -185,6 +199,13 @@ func TestChatCompletionStreaming(t *testing.T) {
 	}
 	if finish != "length" {
 		t.Errorf("finish_reason = %q, want length", finish)
+	}
+	// Streaming must meter too, or every streamed request bills nothing.
+	if streamUsage == nil {
+		t.Fatal("stream carried no usage chunk")
+	}
+	if streamUsage.PromptTokens != 7 || streamUsage.CompletionTokens != 2 {
+		t.Errorf("stream usage = %+v, want prompt=7 completion=2", streamUsage)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -421,6 +422,38 @@ func (m *Manager) Resolve(modelName string) []*computev1.Replica {
 			Addr:         net.JoinHostPort(node.DataPlaneAddr, strconv.Itoa(int(c.port))),
 		})
 	}
+	return out
+}
+
+// ServableModels returns model names that have at least one routable replica.
+// Built on Resolve so "listed" and "routable" cannot drift apart: a model that
+// is listed but unroutable would produce a confusing 503 on the next call.
+func (m *Manager) ServableModels() []string {
+	out := make([]string, 0)
+	for _, name := range m.DeployedModels() {
+		if len(m.Resolve(name)) > 0 {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// DeployedModels returns every desired model name, whether or not it currently
+// has a READY replica. This is what distinguishes "no such model" (404) from
+// "deployed but momentarily unplaced" (503) during a re-placement.
+func (m *Manager) DeployedModels() []string {
+	m.mu.Lock()
+	names := make(map[string]bool)
+	for _, d := range m.deploy {
+		names[d.Spec.GetServedModelName()] = true
+	}
+	m.mu.Unlock()
+
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 
