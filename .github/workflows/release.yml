@@ -5,9 +5,14 @@ name: release
 # Runs on macOS Apple Silicon because the Mac agent links llama.cpp via cgo and
 # must be built on the target architecture. The Linux binaries are pure Go
 # (CGO_ENABLED=0), so they cross-compile from the same runner.
+#
+# MANUAL DISPATCH ONLY, deliberately. On a private repo GitHub bills macOS
+# minutes at 10x, and a cold llama.cpp build can consume a whole month's free
+# allowance in one run. A `push: tags` trigger would spend that every time a
+# version tag was pushed, silently. Cut releases with scripts/publish.sh
+# instead; re-enable the tag trigger if this repo becomes public, where
+# Actions is free.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -75,7 +80,7 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ github.event.inputs.tag }}
         run: |
           gh release create "$TAG" \
             --title "$TAG" \

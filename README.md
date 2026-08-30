@@ -29,13 +29,16 @@ quarantine attribute, so the unsigned binary runs. The installer verifies the
 download against the release's `SHA256SUMS` and refuses to install on a
 mismatch.
 
-Releases are built by `.github/workflows/release.yml` on an Apple Silicon
-runner (the Mac binary links llama.cpp, so it cannot be cross-compiled). Cut
-one with:
+Releases are cut locally, because the Mac binary must be built on Apple
+Silicon and GitHub bills macOS runners at 10x on private repos:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+make publish VERSION=v0.1.0    # tests, builds, tags, uploads via gh
 ```
+
+`.github/workflows/release.yml` does the same thing on CI but is
+manual-dispatch only so it cannot spend money by accident. It becomes the
+better option if this repo goes public, where Actions is free.
 
 ## Try it on one Mac
 

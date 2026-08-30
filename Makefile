@@ -1,4 +1,4 @@
-.PHONY: proto build build-linux-arm64 engine engine-check release test run-coord run-agent lint
+.PHONY: proto build build-linux-arm64 engine engine-check release publish test run-coord run-agent lint
 
 LLAMA_LIB := agent/internal/engine/third_party/llama.cpp/build/src/libllama.a
 
@@ -43,6 +43,12 @@ endif
 	cd dist && shasum -a 256 gridlink-agent-* > SHA256SUMS
 	@echo "--> dist/"
 	@ls -1 dist
+
+# publish cuts a release from this machine. GitHub Actions bills macOS at 10x
+# on private repos, so CI releases are opt-in only (see the workflow).
+publish: ## build, test and publish a release: make publish VERSION=v0.1.0
+	@test -n "$(VERSION)" || { echo "usage: make publish VERSION=v0.1.0" >&2; exit 1; }
+	./scripts/publish.sh $(VERSION)
 
 test:
 	cd contracts && go test ./...
