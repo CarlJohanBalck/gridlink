@@ -9,6 +9,7 @@ import (
 	"time"
 
 	computev1 "gridlink/contracts/gen/compute/v1"
+	"gridlink/coordinator/internal/deployments"
 	"gridlink/coordinator/internal/registry"
 	"gridlink/coordinator/internal/scheduler"
 
@@ -35,10 +36,11 @@ func startTestServer(t *testing.T) (*registry.Registry, *scheduler.Scheduler, fu
 	reg := registry.New(testLogger())
 	sched := scheduler.New(reg, testLogger())
 	cfg := Config{
-		Token:     testToken,
-		Registry:  reg,
-		Scheduler: sched,
-		Logger:    testLogger(),
+		Token:       testToken,
+		Registry:    reg,
+		Scheduler:   sched,
+		Deployments: deployments.New(reg, testLogger()),
+		Logger:      testLogger(),
 	}
 	srv := buildServer(cfg)
 

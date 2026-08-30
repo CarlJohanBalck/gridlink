@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"gridlink/coordinator/internal/deployments"
 	"gridlink/coordinator/internal/registry"
 	"gridlink/coordinator/internal/scheduler"
 	"gridlink/coordinator/internal/server"
@@ -31,12 +32,16 @@ func main() {
 	reg := registry.New(logger)
 	sched := scheduler.New(reg, logger)
 
+	deps := deployments.New(reg, logger)
+
 	if err := server.Serve(ctx, server.Config{
-		Addr:      addr,
-		Token:     token,
-		Registry:  reg,
-		Scheduler: sched,
-		Logger:    logger,
+		Addr:         addr,
+		Token:        token,
+		Registry:     reg,
+		Scheduler:    sched,
+		Deployments:  deps,
+		UsageLogPath: os.Getenv("GRIDLINK_USAGE_LOG"),
+		Logger:       logger,
 	}); err != nil && ctx.Err() == nil {
 		logger.Error("coordinator exited with error", "err", err)
 		os.Exit(1)

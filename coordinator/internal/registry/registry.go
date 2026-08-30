@@ -21,6 +21,9 @@ type Node struct {
 	System   *computev1.SystemInfo
 	LastSeen time.Time
 	Status   computev1.NodeStatus
+	// DataPlaneAddr is where the gateway dials this node, learned from
+	// heartbeats (tailnet IP in Phase 2a). Empty until the agent reports one.
+	DataPlaneAddr string
 	// Send delivers a message onto this node's live stream. Nil when offline.
 	// Set by the server when the stream is established.
 	Send func(*computev1.CoordinatorMessage) error
@@ -86,9 +89,9 @@ func (r *Registry) Upsert(reg *computev1.Register, send func(*computev1.Coordina
 	return id
 }
 
-// Touch records a heartbeat: refreshes LastSeen and keeps the node ONLINE.
-// A heartbeat for an unknown node is ignored.
-func (r *Registry) Touch(nodeID string, _ *computev1.Heartbeat) {
+// Touch records a heartbeat: refreshes LastSeen, keeps the node ONLINE, and
+// records the data-plane address. A heartbeat for an unknown node is ignored.
+func (r *Registry) Touch(nodeID string, hb *computev1.Heartbeat) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -98,6 +101,12 @@ func (r *Registry) Touch(nodeID string, _ *computev1.Heartbeat) {
 	}
 	n.LastSeen = r.now()
 	n.Status = computev1.NodeStatus_NODE_STATUS_ONLINE
+	// Only overwrite when the agent actually knows its address: a node that
+	// has not resolved its tailnet IP yet sends "", and clobbering a good
+	// address with that would break routing to a healthy replica.
+	if addr := hb.GetDataPlaneAddr(); addr != "" {
+		n.DataPlaneAddr = addr
+	}
 }
 
 // MarkDisconnected flags a node OFFLINE and drops its stream handle. Called
@@ -138,7 +147,22 @@ func (r *Registry) List() []*computev1.NodeSummary {
 			Status:         n.Status,
 			Gpu:            n.GPU,
 			LastSeenUnixMs: n.LastSeen.UnixMilli(),
+			System:         n.System,
 		})
+	}
+	return out
+}
+
+// Snapshot returns copies of every node, so callers (placement) can filter
+// without holding the registry lock or racing on live entries.
+func (r *Registry) Snapshot() []*Node {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]*Node, 0, len(r.nodes))
+	for _, n := range r.nodes {
+		cp := *n
+		out = append(out, &cp)
 	}
 	return out
 }

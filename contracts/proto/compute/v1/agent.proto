@@ -133,6 +133,12 @@ message NodeSummary {
   NodeStatus status = 3;
   GpuInfo gpu = 4;
   int64 last_seen_unix_ms = 5;
+  // Included so an operator can see why a node was or was not chosen:
+  // placement turns on system.runners and gpu.usable_vram_mb, and without
+  // these on the wire a node silently not being picked is undebuggable.
+  SystemInfo system = 6;
+  // Deployment IDs currently placed here, newest last.
+  repeated string deployment_ids = 7;
 }
 
 message RunJobRequest {
