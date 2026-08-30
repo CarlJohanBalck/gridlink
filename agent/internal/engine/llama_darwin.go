@@ -13,6 +13,15 @@ package engine
 #include <stdlib.h>
 #include "llama.h"
 #include "ggml-backend.h"
+
+// gridlink_silent_log discards llama.cpp/ggml logging. Defined in C because a
+// Go function cannot be used as a C callback without cgo export machinery,
+// and this needs no Go state. Deliberately NOT static: Go takes its address,
+// which requires external linkage. Only this file carries the preamble, so
+// there is no duplicate-symbol risk.
+void gridlink_silent_log(enum ggml_log_level level, const char *text, void *user_data) {
+    (void) level; (void) text; (void) user_data;
+}
 */
 import "C"
 
@@ -31,6 +40,15 @@ var initOnce sync.Once
 
 func backendInit() {
 	initOnce.Do(func() { C.llama_backend_init() })
+}
+
+// Silence discards llama.cpp's backend chatter, which is written straight to
+// stderr and would otherwise interleave with the agent's structured logs and
+// with `doctor`'s report. The engine subprocess keeps it: there it is the
+// only diagnostic when a model fails to load.
+func Silence() {
+	C.llama_log_set(C.ggml_log_callback(C.gridlink_silent_log), nil)
+	C.ggml_log_set(C.ggml_log_callback(C.gridlink_silent_log), nil)
 }
 
 type llamaModel struct {

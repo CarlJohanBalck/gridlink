@@ -71,11 +71,11 @@ jobs:
         working-directory: dist
         run: shasum -a 256 -c SHA256SUMS
 
-      # The macOS binary must run on the runner, or the release ships something
-      # that cannot start. This catches a broken cgo link that `go build`
-      # alone would not.
+      # `doctor` initialises Metal through cgo and exits non-zero if the GPU
+      # is unusable, so this catches a broken link that `go build` accepts.
+      # (Piping to `head` here would mask the exit code entirely.)
       - name: Smoke-test the macOS binary
-        run: ./dist/gridlink-agent-darwin-arm64 engine 2>&1 | head -1
+        run: ./dist/gridlink-agent-darwin-arm64 doctor
 
       - name: Publish release
         env:

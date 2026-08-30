@@ -11,6 +11,9 @@ func Supported() bool { return false }
 // rather than pretending it can serve them.
 func Load(Params) (Model, error) { return nil, ErrUnsupported }
 
+// Silence is a no-op without an engine.
+func Silence() {}
+
 // GPUStats always fails here, leaving usable_vram_mb at 0 — which the proto
 // defines as "refuse to place".
 func GPUStats() (Stats, error) { return Stats{}, ErrUnsupported }

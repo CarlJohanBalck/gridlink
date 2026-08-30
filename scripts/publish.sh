@@ -53,12 +53,11 @@ make release >/dev/null
 ( cd dist && shasum -a 256 -c SHA256SUMS >/dev/null )
 echo "    ok: $(ls dist | tr '\n' ' ')"
 
-# Executing the binary catches a broken cgo link, which `go build` accepts and
-# which only fails when someone actually runs it.
+# `doctor` initialises Metal through cgo, so this catches a broken link that
+# `go build` accepts and that would only fail on a provider's machine.
 echo "==> smoke-testing the macOS binary"
-./dist/gridlink-agent-darwin-arm64 engine >/dev/null 2>&1 || {
-  echo "error: the macOS binary does not run; refusing to publish" >&2; exit 1; }
-echo "    ok"
+./dist/gridlink-agent-darwin-arm64 doctor || {
+  echo "error: the macOS binary cannot use the GPU; refusing to publish" >&2; exit 1; }
 
 echo "==> tagging $VERSION"
 git tag -a "$VERSION" -m "$VERSION"

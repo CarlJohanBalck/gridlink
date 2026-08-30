@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -20,14 +21,29 @@ import (
 )
 
 func main() {
-	// One binary, two roles. `agent engine` is spawned by the agent itself as
-	// a sandboxed subprocess so providers still install exactly one file.
-	if len(os.Args) > 1 && os.Args[1] == "engine" {
-		if err := runEngine(os.Args[2:]); err != nil {
-			slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("engine failed", "err", err)
-			os.Exit(1)
+	// One binary, several roles. `engine` is spawned by the agent itself as a
+	// sandboxed subprocess, so providers still install exactly one file.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "engine":
+			if err := runEngine(os.Args[2:]); err != nil {
+				slog.New(slog.NewTextHandler(os.Stderr, nil)).Error("engine failed", "err", err)
+				os.Exit(1)
+			}
+			return
+		case "doctor":
+			if err := runDoctor(os.Args[2:]); err != nil {
+				os.Exit(1)
+			}
+			return
+		case "-h", "--help", "help":
+			usage()
+			return
+		default:
+			fmt.Fprintf(os.Stderr, "unknown command %q\n\n", os.Args[1])
+			usage()
+			os.Exit(2)
 		}
-		return
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))

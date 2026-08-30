@@ -24,6 +24,12 @@ Installs a single binary to `~/.local/bin`. No sudo, no Docker, no Python, no
 Homebrew — the agent carries its own inference engine. Apple Silicon Macs get
 GPU inference; the Linux builds are container-job only for now.
 
+Check whether a machine qualifies before signing up for anything:
+
+```sh
+gridlink-agent doctor
+```
+
 No code signing is required: files fetched with `curl` carry no macOS
 quarantine attribute, so the unsigned binary runs. The installer verifies the
 download against the release's `SHA256SUMS` and refuses to install on a
