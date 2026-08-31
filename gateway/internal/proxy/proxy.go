@@ -9,6 +9,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -190,13 +193,18 @@ func (s *server) handleInference(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One ID per inference request, reused across a retry so a request served
+	// by the second replica is still billed once. Minting it per *attempt*
+	// would defeat the coordinator's idempotency.
+	requestID := newRequestID()
+
 	replica, err := s.cfg.Router.Pick(r.Context(), peek.Model)
 	if err != nil {
 		s.routingError(w, r.Context(), peek.Model, err)
 		return
 	}
 
-	if s.forward(w, r, replica, body, peek.Model, peek.Stream) {
+	if s.forward(w, r, replica, body, peek.Model, peek.Stream, requestID) {
 		return
 	}
 
@@ -210,7 +218,7 @@ func (s *server) handleInference(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Warn("retrying on another replica",
 		"model", peek.Model, "failed_node", replica.GetNodeId(), "retry_node", alt.GetNodeId())
-	if !s.forward(w, r, alt, body, peek.Model, peek.Stream) {
+	if !s.forward(w, r, alt, body, peek.Model, peek.Stream, requestID) {
 		writeError(w, http.StatusBadGateway, "server_error", "no reachable replica for "+peek.Model)
 	}
 }
@@ -241,7 +249,7 @@ func (s *server) routingError(w http.ResponseWriter, ctx context.Context, model 
 // forward proxies to one replica. It reports false when the replica could not
 // be reached AND nothing was written yet, so the caller may retry elsewhere.
 func (s *server) forward(w http.ResponseWriter, r *http.Request, replica *computev1.Replica,
-	body []byte, model string, stream bool) bool {
+	body []byte, model string, stream bool, requestID string) bool {
 
 	target, err := url.Parse("http://" + replica.GetAddr())
 	if err != nil {
@@ -302,6 +310,7 @@ func (s *server) forward(w http.ResponseWriter, r *http.Request, replica *comput
 
 	if u, ok := cap.usage(); ok {
 		s.cfg.Usage.Report(usage.Record{
+			RequestID:        requestID,
 			Model:            model,
 			NodeID:           replica.GetNodeId(),
 			DeploymentID:     replica.GetDeploymentId(),
@@ -434,6 +443,16 @@ func (c *capture) scanSSE(r io.Reader) {
 }
 
 // ---- helpers ----
+
+// newRequestID mints the idempotency key for one inference request. Not
+// security-sensitive: it only has to be unique.
+func newRequestID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "req-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return "req-" + hex.EncodeToString(b[:])
+}
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

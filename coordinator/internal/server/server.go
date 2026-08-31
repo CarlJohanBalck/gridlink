@@ -4,13 +4,11 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +17,7 @@ import (
 	"gridlink/coordinator/internal/deployments"
 	"gridlink/coordinator/internal/registry"
 	"gridlink/coordinator/internal/scheduler"
+	"gridlink/coordinator/internal/store"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -43,9 +42,9 @@ type Config struct {
 	Scheduler   *scheduler.Scheduler
 	Deployments *deployments.Manager
 	Logger      *slog.Logger
-	// UsageLogPath receives ReportUsage records as JSONL (Phase 2). Empty
-	// disables usage logging.
-	UsageLogPath string
+	// Store persists usage. Postgres when configured, a JSONL file otherwise.
+	// Required: usage is billing data, so there is no "discard it" mode.
+	Store store.Store
 }
 
 // Serve blocks until ctx is cancelled.
@@ -99,12 +98,13 @@ func buildServer(cfg Config) *grpc.Server {
 		reg:    cfg.Registry,
 		sched:  cfg.Scheduler,
 		deploy: cfg.Deployments,
+		store:  cfg.Store,
 		log:    cfg.Logger,
 	})
 	computev1.RegisterGatewayServiceServer(srv, &gatewayServer{
-		deploy:   cfg.Deployments,
-		usageLog: cfg.UsageLogPath,
-		log:      cfg.Logger,
+		deploy: cfg.Deployments,
+		store:  cfg.Store,
+		log:    cfg.Logger,
 	})
 	// Reflection is a Phase-1 dev convenience so grpcurl works without proto
 	// paths. Note: the auth interceptor also guards the reflection service.
@@ -231,6 +231,7 @@ type adminServer struct {
 	reg    *registry.Registry
 	sched  *scheduler.Scheduler
 	deploy *deployments.Manager
+	store  store.Store
 	log    *slog.Logger
 }
 
@@ -296,11 +297,9 @@ func (s *adminServer) ListDeployments(_ context.Context, _ *computev1.ListDeploy
 
 type gatewayServer struct {
 	computev1.UnimplementedGatewayServiceServer
-	deploy   *deployments.Manager
-	usageLog string
-	log      *slog.Logger
-
-	usageMu sync.Mutex
+	deploy *deployments.Manager
+	store  store.Store
+	log    *slog.Logger
 }
 
 func (s *gatewayServer) ResolveModel(_ context.Context, req *computev1.ResolveModelRequest) (*computev1.ResolveModelResponse, error) {
@@ -320,41 +319,89 @@ func (s *gatewayServer) ListModels(_ context.Context, req *computev1.ListModelsR
 	return &computev1.ListModelsResponse{ServedModelNames: names}, nil
 }
 
-// ReportUsage appends one JSONL record per request. Phase 2 only logs; Phase 3
-// turns this into the ledger feed, so the record shape is the thing that has
-// to be right, not the sink.
-func (s *gatewayServer) ReportUsage(_ context.Context, req *computev1.ReportUsageRequest) (*computev1.ReportUsageResponse, error) {
-	if s.usageLog == "" {
-		return &computev1.ReportUsageResponse{}, nil
-	}
-	rec := map[string]any{
-		"ts_unix_ms":        req.GetTimestampUnixMs(),
-		"served_model_name": req.GetServedModelName(),
-		"node_id":           req.GetNodeId(),
-		"deployment_id":     req.GetDeploymentId(),
-		"api_key_id":        req.GetApiKeyId(),
-		"prompt_tokens":     req.GetPromptTokens(),
-		"completion_tokens": req.GetCompletionTokens(),
-	}
-	line, err := json.Marshal(rec)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+// ReportUsage records one billed request. Phase 2 logged these to a file;
+// Phase 3 persists them, and Phase 4 settles payments against them.
+func (s *gatewayServer) ReportUsage(ctx context.Context, req *computev1.ReportUsageRequest) (*computev1.ReportUsageResponse, error) {
+	// Without a request_id a retry is indistinguishable from a second request,
+	// so accepting one risks double-billing. Refuse rather than guess.
+	if req.GetRequestId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "request_id is required")
 	}
 
-	// Serialized so concurrent gateway reports cannot interleave partial lines
-	// into the JSONL.
-	s.usageMu.Lock()
-	defer s.usageMu.Unlock()
-	f, err := os.OpenFile(s.usageLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		// Usage is billing data: failing loudly beats silently losing it.
-		s.log.Error("cannot open usage log", "path", s.usageLog, "err", err)
-		return nil, status.Error(codes.Unavailable, "usage log unavailable")
+	ts := time.Now().UTC()
+	if ms := req.GetTimestampUnixMs(); ms > 0 {
+		ts = time.UnixMilli(ms).UTC()
 	}
-	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		s.log.Error("cannot append usage record", "err", err)
-		return nil, status.Error(codes.Unavailable, "usage log write failed")
+
+	err := s.store.Insert(ctx, store.UsageRecord{
+		RequestID:        req.GetRequestId(),
+		Timestamp:        ts,
+		ServedModelName:  req.GetServedModelName(),
+		NodeID:           req.GetNodeId(),
+		DeploymentID:     req.GetDeploymentId(),
+		APIKeyID:         req.GetApiKeyId(),
+		PromptTokens:     req.GetPromptTokens(),
+		CompletionTokens: req.GetCompletionTokens(),
+	})
+	switch {
+	case errors.Is(err, store.ErrInvalidRecord):
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	case err != nil:
+		// Usage is billing data: fail loudly so the gateway can retry rather
+		// than silently losing revenue.
+		s.log.Error("recording usage failed", "request_id", req.GetRequestId(), "err", err)
+		return nil, status.Error(codes.Unavailable, "could not record usage")
 	}
 	return &computev1.ReportUsageResponse{}, nil
+}
+
+// defaultSummaryWindow is used when the caller names no window: the common
+// question is "what happened today".
+const defaultSummaryWindow = 24 * time.Hour
+
+func (s *adminServer) GetUsageSummary(ctx context.Context, req *computev1.GetUsageSummaryRequest) (*computev1.GetUsageSummaryResponse, error) {
+	to := time.Now().UTC()
+	if ms := req.GetToUnixMs(); ms > 0 {
+		to = time.UnixMilli(ms).UTC()
+	}
+	from := to.Add(-defaultSummaryWindow)
+	if ms := req.GetFromUnixMs(); ms > 0 {
+		from = time.UnixMilli(ms).UTC()
+	}
+	if !from.Before(to) {
+		return nil, status.Error(codes.InvalidArgument, "from must be before to")
+	}
+
+	sum, err := s.store.Summarize(ctx, from, to)
+	if err != nil {
+		// The JSONL sink cannot aggregate and says so. Surfacing that message
+		// beats returning zeros that would read as "no usage".
+		s.log.Error("usage summary failed", "err", err)
+		return nil, status.Error(codes.FailedPrecondition, err.Error())
+	}
+
+	return &computev1.GetUsageSummaryResponse{
+		FromUnixMs: from.UnixMilli(),
+		ToUnixMs:   to.UnixMilli(),
+		Total:      totalsToProto(sum.Total),
+		ByNode:     totalsSliceToProto(sum.ByNode),
+		ByApiKey:   totalsSliceToProto(sum.ByAPIKey),
+	}, nil
+}
+
+func totalsToProto(t store.Totals) *computev1.UsageTotals {
+	return &computev1.UsageTotals{
+		Key:              t.Key,
+		Requests:         t.Requests,
+		PromptTokens:     t.PromptTokens,
+		CompletionTokens: t.CompletionTokens,
+	}
+}
+
+func totalsSliceToProto(in []store.Totals) []*computev1.UsageTotals {
+	out := make([]*computev1.UsageTotals, 0, len(in))
+	for _, t := range in {
+		out = append(out, totalsToProto(t))
+	}
+	return out
 }

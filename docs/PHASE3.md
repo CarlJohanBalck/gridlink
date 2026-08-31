@@ -101,7 +101,15 @@ Migrations apply themselves at startup, so there is no separate step.
 1. ~~`store` package~~ — done: migrations, `Insert`, idempotency, and a
    `Summary` query, plus a JSONL fallback implementing the same interface.
    Postgres tests are skipped unless `GRIDLINK_TEST_DATABASE_URL` is set.
-2. Proto: `request_id` on ReportUsage, `GetUsageSummary` on AdminService.
-   Wire the coordinator to the store; keep the JSONL fallback.
-3. Gateway: mint a `request_id` per request and send it.
-4. Dashboard.
+2. ~~Proto + coordinator wiring~~ — done: `request_id` on ReportUsage,
+   `GetUsageSummary` on AdminService, store selected at startup from
+   `GRIDLINK_DATABASE_URL` / `GRIDLINK_USAGE_LOG`.
+3. ~~Gateway mints a `request_id`~~ — done, one per inference request and
+   reused across a retry so a retried request is still billed once.
+4. Dashboard: a read-only page on the coordinator showing nodes, deployments
+   and usage totals.
+
+Verified end to end against Postgres: three requests through the gateway
+produced three rows, `GetUsageSummary` reported 3 requests / 35 prompt /
+37 completion tokens broken down by node and by API key, and the totals were
+identical after restarting the coordinator.

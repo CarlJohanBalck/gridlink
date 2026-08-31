@@ -26,6 +26,9 @@ const queueSize = 1024
 const reportTimeout = 5 * time.Second
 
 type Record struct {
+	// RequestID is the idempotency key. The coordinator rejects a report
+	// without one, because a retry would otherwise be billed twice.
+	RequestID        string
 	Model            string
 	NodeID           string
 	DeploymentID     string
@@ -121,6 +124,7 @@ func (r *Reporter) send(rec Record) {
 	defer cancel()
 
 	_, err := r.client.ReportUsage(ctx, &computev1.ReportUsageRequest{
+		RequestId:        rec.RequestID,
 		ServedModelName:  rec.Model,
 		NodeId:           rec.NodeID,
 		DeploymentId:     rec.DeploymentID,

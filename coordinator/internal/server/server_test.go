@@ -5,6 +5,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"gridlink/coordinator/internal/deployments"
 	"gridlink/coordinator/internal/registry"
 	"gridlink/coordinator/internal/scheduler"
+	"gridlink/coordinator/internal/store"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -40,7 +43,10 @@ func startTestServer(t *testing.T) (*registry.Registry, *scheduler.Scheduler, fu
 		Registry:    reg,
 		Scheduler:   sched,
 		Deployments: deployments.New(reg, testLogger()),
-		Logger:      testLogger(),
+		// A JSONL store in a temp dir: exercises the real code path without
+		// needing Postgres, and a nil store would panic on any usage call.
+		Store:  store.OpenJSONL(filepath.Join(t.TempDir(), "usage.jsonl")),
+		Logger: testLogger(),
 	}
 	srv := buildServer(cfg)
 
@@ -334,4 +340,93 @@ func eventually(t *testing.T, timeout time.Duration, cond func() bool) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return cond()
+}
+
+// ---- Phase 3: usage ----
+
+// A report without a request_id cannot be deduplicated, so accepting it would
+// risk billing the same request twice.
+func TestReportUsageRequiresRequestID(t *testing.T) {
+	_, _, dial := startTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := dial(ctx)
+	defer conn.Close()
+	gw := computev1.NewGatewayServiceClient(conn)
+
+	_, err := gw.ReportUsage(authCtx(ctx, testToken), &computev1.ReportUsageRequest{
+		ServedModelName: "qwen-0.5b",
+		NodeId:          "node-a",
+		PromptTokens:    10,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("ReportUsage without request_id: code = %v, want InvalidArgument", status.Code(err))
+	}
+}
+
+func TestReportUsageAcceptsAndDeduplicates(t *testing.T) {
+	_, _, dial := startTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := dial(ctx)
+	defer conn.Close()
+	gw := computev1.NewGatewayServiceClient(conn)
+
+	req := &computev1.ReportUsageRequest{
+		RequestId:        "req-1",
+		ServedModelName:  "qwen-0.5b",
+		NodeId:           "node-a",
+		DeploymentId:     "dep-1",
+		ApiKeyId:         "key-0",
+		PromptTokens:     12,
+		CompletionTokens: 7,
+	}
+	// Reporting twice must succeed both times: the gateway retries on timeout
+	// and cannot tell a duplicate from a first attempt.
+	for i := 0; i < 2; i++ {
+		if _, err := gw.ReportUsage(authCtx(ctx, testToken), req); err != nil {
+			t.Fatalf("ReportUsage attempt %d: %v", i+1, err)
+		}
+	}
+}
+
+// The JSONL sink cannot aggregate. The error must name the fix rather than
+// returning zeros that would read as "nobody used anything".
+func TestGetUsageSummaryWithoutDatabase(t *testing.T) {
+	_, _, dial := startTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := dial(ctx)
+	defer conn.Close()
+	admin := computev1.NewAdminServiceClient(conn)
+
+	_, err := admin.GetUsageSummary(authCtx(ctx, testToken), &computev1.GetUsageSummaryRequest{})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %v, want FailedPrecondition", status.Code(err))
+	}
+	if !strings.Contains(status.Convert(err).Message(), "GRIDLINK_DATABASE_URL") {
+		t.Errorf("message %q should name the setting that fixes it", status.Convert(err).Message())
+	}
+}
+
+func TestGetUsageSummaryRejectsInvertedWindow(t *testing.T) {
+	_, _, dial := startTestServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn := dial(ctx)
+	defer conn.Close()
+	admin := computev1.NewAdminServiceClient(conn)
+
+	now := time.Now().UnixMilli()
+	_, err := admin.GetUsageSummary(authCtx(ctx, testToken), &computev1.GetUsageSummaryRequest{
+		FromUnixMs: now,
+		ToUnixMs:   now - 1000,
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("code = %v, want InvalidArgument", status.Code(err))
+	}
 }

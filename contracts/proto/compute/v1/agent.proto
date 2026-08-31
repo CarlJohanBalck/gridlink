@@ -22,6 +22,8 @@ service AdminService {
   rpc CreateDeployment(CreateDeploymentRequest) returns (CreateDeploymentResponse);
   rpc DeleteDeployment(DeleteDeploymentRequest) returns (DeleteDeploymentResponse);
   rpc ListDeployments(ListDeploymentsRequest) returns (ListDeploymentsResponse);
+  // Phase 3
+  rpc GetUsageSummary(GetUsageSummaryRequest) returns (GetUsageSummaryResponse);
 }
 
 // GatewayService is served by the COORDINATOR for the gateway's benefit:
@@ -210,9 +212,40 @@ message ReportUsageRequest {
   uint64 prompt_tokens = 5;
   uint64 completion_tokens = 6;
   int64 timestamp_unix_ms = 7;
+  // Idempotency key, minted by the gateway once per inference request.
+  // REQUIRED: without it a retried report is indistinguishable from a second
+  // request, which would bill the customer and credit the provider twice.
+  // The coordinator rejects a report that omits it.
+  string request_id = 8;
 }
 
 message ReportUsageResponse {}
+
+// ---- Phase 3: usage summaries ----
+
+message GetUsageSummaryRequest {
+  // Window is [from, to). Both default when 0: the last 24 hours.
+  int64 from_unix_ms = 1;
+  int64 to_unix_ms = 2;
+}
+
+message UsageTotals {
+  // Node ID or API key ID these totals belong to; empty on the grand total.
+  string key = 1;
+  uint64 requests = 2;
+  uint64 prompt_tokens = 3;
+  uint64 completion_tokens = 4;
+}
+
+message GetUsageSummaryResponse {
+  int64 from_unix_ms = 1;
+  int64 to_unix_ms = 2;
+  UsageTotals total = 3;
+  // What each provider node earned, and what each API key spent, over the
+  // window. Ordered by total tokens, descending.
+  repeated UsageTotals by_node = 4;
+  repeated UsageTotals by_api_key = 5;
+}
 
 message ListModelsRequest {
   // When true, include models that are deployed but have no READY replica
