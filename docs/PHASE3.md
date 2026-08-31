@@ -84,11 +84,23 @@ CREATE INDEX usage_records_key_ts_idx  ON usage_records (api_key_id, ts);
 - The dashboard shows nodes, deployments and usage totals, and needs no
   database of its own.
 
+## Running Postgres for development
+
+```sh
+docker run -d --name gridlink-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=gridlink \
+  -p 55432:5432 postgres:16-alpine
+
+export GRIDLINK_TEST_DATABASE_URL="postgres://postgres:dev@localhost:55432/gridlink?sslmode=disable"
+cd coordinator && go test ./internal/store/ -v
+```
+
+Migrations apply themselves at startup, so there is no separate step.
+
 ## Suggested sessions
 
-1. `store` package: migrations, `Insert`, idempotency, and a `Summary` query.
-   Tested against a real Postgres, skipped unless `GRIDLINK_TEST_DATABASE_URL`
-   is set.
+1. ~~`store` package~~ — done: migrations, `Insert`, idempotency, and a
+   `Summary` query, plus a JSONL fallback implementing the same interface.
+   Postgres tests are skipped unless `GRIDLINK_TEST_DATABASE_URL` is set.
 2. Proto: `request_id` on ReportUsage, `GetUsageSummary` on AdminService.
    Wire the coordinator to the store; keep the JSONL fallback.
 3. Gateway: mint a `request_id` per request and send it.
