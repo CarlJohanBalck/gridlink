@@ -64,6 +64,7 @@ func TestManualNativeDeployment(t *testing.T) {
 		agentBin:  absBin,
 		modelsDir: dir,
 		sandbox:   sandboxCommand, // the real sandbox-exec profile
+		bindHost:  "127.0.0.1",
 		log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 

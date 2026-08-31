@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -43,6 +44,13 @@ type modelSpec struct {
 // NativeManager serves models with the agent's own Metal engine, run as a
 // sandboxed subprocess of the agent binary.
 type NativeManager struct {
+	// bindHost is the interface the engine listens on. It MUST match the
+	// address the agent advertises as data_plane_addr, or the gateway will be
+	// told to dial somewhere nothing is listening. Defaults to loopback, which
+	// is correct for a single-machine setup and safe by default: the engine
+	// has no auth of its own, so binding a routable interface exposes it to
+	// whatever can reach that interface (in Phase 2a, the tailnet).
+	bindHost string
 	// agentBin is the path re-executed as `agent engine`. Defaults to this
 	// process's own executable.
 	agentBin string
@@ -55,7 +63,10 @@ type NativeManager struct {
 
 var _ Manager = (*NativeManager)(nil)
 
-func NewNativeManager(log *slog.Logger) (*NativeManager, error) {
+// NewNativeManager builds the manager. bindHost is the interface the engine
+// listens on; pass the same value the agent advertises as its data-plane
+// address, or "" for loopback only.
+func NewNativeManager(log *slog.Logger, bindHost string) (*NativeManager, error) {
 	bin, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("locate agent binary: %w", err)
@@ -64,10 +75,14 @@ func NewNativeManager(log *slog.Logger) (*NativeManager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("locate home dir: %w", err)
 	}
+	if bindHost == "" {
+		bindHost = "127.0.0.1"
+	}
 	return &NativeManager{
 		agentBin:  bin,
 		modelsDir: filepath.Join(home, ".gridlink", "models"),
 		sandbox:   sandboxCommand,
+		bindHost:  bindHost,
 		log:       log,
 	}, nil
 }
@@ -128,10 +143,14 @@ func (m *NativeManager) run(ctx context.Context, spec *computev1.DeploymentSpec,
 	// ---- LOADING ----
 	send(Update{State: computev1.DeploymentState_DEPLOYMENT_STATE_LOADING})
 
+	bind := m.bindHost
+	if bind == "" {
+		bind = "127.0.0.1"
+	}
 	args := []string{m.agentBin, "engine",
 		"-model", modelPath,
 		"-served-model-name", spec.GetServedModelName(),
-		"-addr", "127.0.0.1:0",
+		"-addr", net.JoinHostPort(bind, "0"),
 	}
 	if n := native.GetContextLength(); n > 0 {
 		args = append(args, "-context-length", fmt.Sprint(n))

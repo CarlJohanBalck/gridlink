@@ -49,6 +49,9 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	coordAddr := envOr("GRIDLINK_COORDINATOR", "localhost:50051")
+	// Where the gateway reaches this node's engines. Loopback works only when
+	// the gateway runs on this machine.
+	dataPlaneAddr := envOr("GRIDLINK_DATA_ADDR", "127.0.0.1")
 	token := os.Getenv("GRIDLINK_TOKEN")
 	if token == "" {
 		logger.Error("GRIDLINK_TOKEN is required")
@@ -87,7 +90,9 @@ func main() {
 	// build, so a node never attracts deployments it cannot serve.
 	var deployments deploy.Manager
 	if engine.Supported() {
-		nm, err := deploy.NewNativeManager(logger)
+		// The engine binds the same address the agent advertises, or the
+		// gateway would be told to dial a port that only exists on loopback.
+		nm, err := deploy.NewNativeManager(logger, dataPlaneAddr)
 		if err != nil {
 			logger.Error("metal engine unavailable", "err", err)
 		} else {
@@ -117,7 +122,7 @@ func main() {
 		Utilization:     gpu.Utilization,
 		Runner:          run,
 		Deployments:     deployments,
-		DataPlaneAddr:   os.Getenv("GRIDLINK_DATA_ADDR"),
+		DataPlaneAddr:   dataPlaneAddr,
 		Logger:          logger,
 	})
 
