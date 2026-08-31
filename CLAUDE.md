@@ -7,22 +7,26 @@ for it. Providers run a lightweight **agent**; a central **coordinator** schedul
 containerized AI workloads onto them; later phases add an inference **gateway**,
 metering, and payouts.
 
-## Current phase: PHASE 1
+## Current phase: PHASE 3
 
-**Goal:** Two machines. An agent that (a) detects its GPU, (b) registers with the
-coordinator over a single outbound gRPC stream, (c) heartbeats, and (d) runs a
-containerized job on command and streams status back. No payments, no web UI,
-no inference gateway, no persistence beyond in-memory (Postgres comes in Phase 3).
+**Goal:** Durable metering. Usage currently lands in a JSONL file that a
+coordinator restart leaves behind and nothing can query. Phase 3 puts it in
+Postgres, aggregates it per provider and per API key, and exposes it — which is
+what payments in Phase 4 will settle against.
 
 Do NOT build ahead of the current phase unless explicitly asked. If a task seems
-to require Phase 2+ functionality, stop and flag it instead of building it.
+to require Phase 4+ functionality, stop and flag it instead of building it.
+
+**Postgres is a COORDINATOR dependency only.** Providers still install one
+binary and nothing else; the zero-preinstall rule is about provider machines.
 
 ### Phase roadmap (context only — do not implement future phases)
-1. **Plumbing (now):** register / heartbeat / run container job over one stream
-2. Inference endpoints: native Metal engine on Mac providers + OpenAI-compatible
-   gateway (spec: docs/PHASE2.md — scaffolding exists but stays unimplemented in
-   Phase 1)
-3. Metering + ledger (Postgres), dashboard
+1. ~~Plumbing:~~ register / heartbeat / run container job over one stream — done
+2. ~~Inference endpoints:~~ native Metal engine on Mac providers +
+   OpenAI-compatible gateway (spec + measured results: docs/PHASE2.md) — done,
+   verified across two machines
+3. **Metering + ledger (now):** Postgres, aggregation, dashboard
+   (spec: docs/PHASE3.md)
 4. Payments (Stripe Connect / USDC), verification & reputation
 
 ## Architecture decisions (settled — do not relitigate)
@@ -54,7 +58,9 @@ to require Phase 2+ functionality, stop and flag it instead of building it.
   fall back to parsing `nvidia-smi --query-gpu=... --format=csv`).
   GPU detection is per-platform: `nvidia-smi` CSV on Linux, `system_profiler
   SPDisplaysDataType -json` on macOS (vendor `apple`). Phase 2 adds llama.cpp
-  vendored and linked via cgo — the only cgo in the tree, macOS-only.
+  vendored and linked via cgo — the only cgo in the tree, macOS-only. Phase 3
+  adds `github.com/jackc/pgx/v5` (coordinator only). No ORM: SQL is written by
+  hand, and migrations are plain embedded .sql files applied in order.
 - **Horizontal scale-out only — never shard a model across nodes.** One node
   serves one whole model; the coordinator routes each request to exactly one
   node. No tensor or pipeline parallelism, no cross-node hop in the request
@@ -81,19 +87,27 @@ agent/                        provider daemon (Go module: gridlink/agent)
   internal/gpu/               GPU detection & benchmarking
   internal/runner/            Docker job execution
   internal/client/            coordinator stream client + reconnect loop
+  internal/engine/            Metal inference engine (cgo, macOS only) + its
+                              OpenAI-compatible HTTP server
+  internal/deploy/            long-running deployments: weight download,
+                              sandboxed engine subprocess, readiness
+  internal/sysinfo/           OS/arch/CPU/RAM detection
 coordinator/                  control plane (Go module: gridlink/coordinator)
   cmd/coordinator/            main entrypoint
   internal/server/            gRPC server + stream handling
-  internal/registry/          in-memory node registry (Phase 1)
-  internal/scheduler/         job dispatch (Phase 1: manual via admin RPC)
-  internal/deployments/       PHASE 2: deployment desired-state + reconciler
-gateway/                      PHASE 2: OpenAI-compatible inference front door
+  internal/registry/          in-memory node registry
+  internal/scheduler/         one-shot job dispatch (manual via admin RPC)
+  internal/deployments/       deployment desired-state + placement + reconciler
+  internal/store/             PHASE 3: Postgres persistence for usage/ledger
+gateway/                      OpenAI-compatible inference front door
   internal/dialer/            data-plane transport seam (Tailscale now, tunnel later)
   internal/router/            model -> replica resolution (via coordinator)
   internal/proxy/             HTTP server, SSE passthrough, usage capture
   internal/usage/             async usage reporting
-docs/PHASE2.md                Phase 2 spec + definition of done
-scripts/                      dev helpers
+docs/STATUS.md                where things stand + what is next (read first)
+docs/PHASE2.md                Phase 2 spec + measured engine-spike results
+docs/PHASE3.md                Phase 3 spec + definition of done
+scripts/                      dev helpers, installer, release + demo scripts
 ```
 
 ## Conventions
@@ -114,19 +128,22 @@ scripts/                      dev helpers
 
 ```
 make proto          # regenerate Go code from contracts/proto (buf generate)
-make build          # build both binaries into ./bin
-make test           # go test ./... in both modules
+make engine         # fetch + build llama.cpp for the Metal engine (macOS, once)
+make build          # build all binaries into ./bin
+make test           # go test ./... in every module
+make release        # provider binaries + SHA256SUMS into ./dist
+make publish VERSION=v0.1.0   # test, build, tag and upload a release
 make run-coord      # run coordinator locally on :50051
 make run-agent      # run agent against localhost coordinator
+./scripts/demo.sh start       # coordinator + agent + gateway, serving a model
 docker compose up   # coordinator + a fake-GPU agent for local dev
 ```
 
-## Definition of done for Phase 1
+## Definition of done
 
-- `make run-coord` + `make run-agent` on two machines: agent appears in the
-  coordinator's node list with real GPU info and stays ONLINE via heartbeats.
-- An admin RPC (`AdminService.RunJob`) can push a job (e.g. image
-  `nvidia/cuda:12.4.1-base-ubuntu22.04`, cmd `nvidia-smi`) to a named node; the
-  agent runs it and streams PENDING → RUNNING → SUCCEEDED/FAILED + logs back.
-- Agent survives coordinator restarts (reconnect + re-register, same node_id).
-- `make test` passes with no Docker daemon and no GPU present.
+Phases 1 and 2 are done; see docs/STATUS.md for what was verified and how to
+reproduce it. The current phase's definition of done lives in docs/PHASE3.md.
+
+Unchanged across every phase: **`make test` passes with no Docker daemon, no
+GPU, and no database present.** Tests that need real hardware or a real
+Postgres are opt-in behind an env var and skipped by default.
