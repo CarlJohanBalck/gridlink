@@ -37,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /v1/models", s.handleModels)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
+	mux.HandleFunc("POST /v1/completions", s.handleCompletion)
 	return mux
 }
 
@@ -99,6 +100,129 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.blockingChat(w, r, genReq)
+}
+
+// handleCompletion serves the legacy (non-chat) completion API. The prompt is
+// used verbatim: no chat template, which is the whole point of this endpoint.
+func (s *Server) handleCompletion(w http.ResponseWriter, r *http.Request) {
+	var req completionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "malformed JSON body")
+		return
+	}
+	prompt, err := req.promptText()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	if req.Model != "" && req.Model != s.modelName {
+		writeError(w, http.StatusNotFound, "model_not_found",
+			fmt.Sprintf("this node serves %q, not %q", s.modelName, req.Model))
+		return
+	}
+
+	genReq := GenerateRequest{
+		Prompt:      prompt,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+		Stop:        req.stopSequences(),
+	}
+	if req.Stream {
+		s.streamText(w, r, genReq)
+		return
+	}
+	s.blockingText(w, r, genReq)
+}
+
+func (s *Server) blockingText(w http.ResponseWriter, r *http.Request, req GenerateRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ch, err := s.model.Generate(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	var sb strings.Builder
+	finish := "stop"
+	var u usage
+	for tok := range ch {
+		if tok.Err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", tok.Err.Error())
+			return
+		}
+		sb.WriteString(tok.Text)
+		if tok.Done {
+			if tok.Reason != "" {
+				finish = tok.Reason
+			}
+			u = usageOf(tok)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, completionResponse{
+		ID:      "cmpl-" + randomID(),
+		Object:  "text_completion",
+		Created: time.Now().Unix(),
+		Model:   s.modelName,
+		Choices: []completionChoice{{Index: 0, Text: sb.String(), FinishReason: finish}},
+		Usage:   &u,
+	})
+}
+
+func (s *Server) streamText(w http.ResponseWriter, r *http.Request, req GenerateRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "server_error", "streaming unsupported")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ch, err := s.model.Generate(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	id := "cmpl-" + randomID()
+	created := time.Now().Unix()
+	finish := "stop"
+	var u usage
+
+	for tok := range ch {
+		if tok.Err != nil {
+			s.log.Error("generation failed mid-stream", "err", tok.Err)
+			break
+		}
+		if tok.Text != "" {
+			s.sendJSON(w, flusher, completionChunk{
+				ID: id, Object: "text_completion", Created: created, Model: s.modelName,
+				Choices: []completionChoice{{Index: 0, Text: tok.Text}},
+			})
+		}
+		if tok.Done {
+			if tok.Reason != "" {
+				finish = tok.Reason
+			}
+			u = usageOf(tok)
+		}
+	}
+
+	s.sendJSON(w, flusher, completionChunk{
+		ID: id, Object: "text_completion", Created: created, Model: s.modelName,
+		Choices: []completionChoice{{Index: 0, Text: "", FinishReason: finish}},
+		Usage:   &u,
+	})
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func (s *Server) blockingChat(w http.ResponseWriter, r *http.Request, req GenerateRequest) {
@@ -214,7 +338,11 @@ func (s *Server) streamChat(w http.ResponseWriter, r *http.Request, req Generate
 }
 
 func (s *Server) sendChunk(w http.ResponseWriter, f http.Flusher, c streamChunk) {
-	b, err := json.Marshal(c)
+	s.sendJSON(w, f, c)
+}
+
+func (s *Server) sendJSON(w http.ResponseWriter, f http.Flusher, v any) {
+	b, err := json.Marshal(v)
 	if err != nil {
 		s.log.Error("marshalling stream chunk", "err", err)
 		return
@@ -238,18 +366,24 @@ type chatRequest struct {
 
 // stopSequences accepts both shapes the OpenAI API allows.
 func (r chatRequest) stopSequences() []string {
-	if len(r.Stop) == 0 {
+	return stopFrom(r.Stop)
+}
+
+// stopFrom normalises `stop`, which the OpenAI API allows as either a string
+// or an array of strings.
+func stopFrom(raw json.RawMessage) []string {
+	if len(raw) == 0 {
 		return nil
 	}
 	var one string
-	if err := json.Unmarshal(r.Stop, &one); err == nil {
+	if err := json.Unmarshal(raw, &one); err == nil {
 		if one == "" {
 			return nil
 		}
 		return []string{one}
 	}
 	var many []string
-	if err := json.Unmarshal(r.Stop, &many); err == nil {
+	if err := json.Unmarshal(raw, &many); err == nil {
 		return many
 	}
 	return nil
@@ -304,6 +438,73 @@ type streamChunk struct {
 	Model   string         `json:"model"`
 	Choices []streamChoice `json:"choices"`
 	Usage   *usage         `json:"usage,omitempty"`
+}
+
+// completionRequest is the legacy /v1/completions shape.
+type completionRequest struct {
+	Model       string  `json:"model"`
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float32 `json:"temperature"`
+	Stream      bool    `json:"stream"`
+	// Prompt is a string or []string in the OpenAI API.
+	Prompt json.RawMessage `json:"prompt"`
+	Stop   json.RawMessage `json:"stop"`
+}
+
+// promptText accepts both shapes the OpenAI API allows. A multi-prompt array
+// is rejected rather than silently answering only the first: returning one
+// choice for several prompts would look like a model bug to the caller.
+func (r completionRequest) promptText() (string, error) {
+	if len(r.Prompt) == 0 {
+		return "", fmt.Errorf("prompt is required")
+	}
+	var one string
+	if err := json.Unmarshal(r.Prompt, &one); err == nil {
+		if one == "" {
+			return "", fmt.Errorf("prompt must not be empty")
+		}
+		return one, nil
+	}
+	var many []string
+	if err := json.Unmarshal(r.Prompt, &many); err == nil {
+		switch len(many) {
+		case 0:
+			return "", fmt.Errorf("prompt must not be empty")
+		case 1:
+			return many[0], nil
+		default:
+			return "", fmt.Errorf("batched prompts are not supported; send one prompt per request")
+		}
+	}
+	return "", fmt.Errorf("prompt must be a string or an array of strings")
+}
+
+func (r completionRequest) stopSequences() []string {
+	return stopFrom(r.Stop)
+}
+
+type completionChoice struct {
+	Index        int    `json:"index"`
+	Text         string `json:"text"`
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
+type completionResponse struct {
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
+	Choices []completionChoice `json:"choices"`
+	Usage   *usage             `json:"usage,omitempty"`
+}
+
+type completionChunk struct {
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
+	Choices []completionChoice `json:"choices"`
+	Usage   *usage             `json:"usage,omitempty"`
 }
 
 type modelInfo struct {

@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-30**, branch `main`, HEAD `6aa6307`, working tree clean.
+Last updated: **2026-08-30**, branch `main`, HEAD `fcf363a`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -137,12 +137,18 @@ HOME=/tmp/node2 GRIDLINK_TOKEN=... GRIDLINK_DATA_ADDR=127.0.0.1 ./bin/agent
 
 Phase 2 is functionally complete. What remains before calling it shipped:
 
-1. ~~Notarization~~ — **done differently**: `scripts/install.sh` ships the
-   agent as a terminal install, which needs no Apple account (see the
-   corrected note below). `make release` builds the artifacts and a
-   SHA256SUMS the installer verifies. What is still missing is somewhere to
-   publish them: the installer points at a GitHub releases URL that does not
-   exist yet.
+1. ~~Notarization / distribution~~ — **done**. The repo is public and
+   `v0.1.0` is released, so this works today and was verified end to end by
+   installing from the public URL on a clean path:
+
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/CarlJohanBalck/gridlink/main/scripts/install.sh | sh
+   ```
+
+   The downloaded binary carries no quarantine attribute and runs unsigned —
+   no Apple Developer account. `make publish VERSION=vX.Y.Z` cuts a release
+   locally. Now that the repo is public, GitHub Actions is free, so the tag
+   trigger in `.github/workflows/release.yml` can be re-enabled instead.
 2. ~~Cross-machine data plane~~ — **done over LAN** (`6aa6307`). Gateway on
    the Raspberry Pi, coordinator and Metal engine on the Mac: inference flows
    client -> Pi gateway -> Mac engine and back, streaming and not, with usage
@@ -150,9 +156,7 @@ Phase 2 is functionally complete. What remains before calling it shipped:
    engine bound loopback while the agent advertised a routable address, so
    the gateway was told to dial a port that existed nowhere. Still untested
    over an actual **tailnet** (as opposed to a LAN), and across NAT.
-3. **`/v1/completions` is routed but unimplemented by the native engine** —
-   it forwards and 404s. Either implement it or stop advertising the route.
-4. **The gateway is a single point of failure** and holds request bodies in
+3. **The gateway is a single point of failure** and holds request bodies in
    memory (8 MiB cap) to allow retries. Fine at this scale; worth revisiting
    before real traffic.
 
@@ -178,10 +182,13 @@ curl -H "Authorization: Bearer sk-lan-test" http://<pi-ip>:8099/v1/chat/completi
 
 ## Open items that need you, not code
 
-- **Publish the release artifacts.** `make release` produces them and
-  `scripts/install.sh` expects them at `GRIDLINK_BASE_URL`, but nothing is
-  hosted yet, so the documented curl command does not work for anyone else.
-  Tested end to end against a local HTTP server.
+- **The Linux release binaries have no inference engine.** They are pure Go
+  (CGO_ENABLED=0), so they install and pass `doctor` but report
+  `gpu inference no` and can only run container jobs. Worth saying on the
+  README before Linux users arrive expecting GPU work.
+- **`dev-token` is the documented default shared secret.** Fine for local
+  dev, but the repo is public now: a real coordinator must be started with an
+  actual `GRIDLINK_TOKEN`.
 - **Apple Developer enrollment ($99/yr) is OPTIONAL, not a blocker.** Earlier
   notes here overstated it. Gatekeeper only kills binaries carrying the
   quarantine attribute, which browsers set and `curl`/`brew`/`scp` do not —

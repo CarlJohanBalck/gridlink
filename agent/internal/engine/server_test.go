@@ -322,3 +322,129 @@ func TestIndexAnyStop(t *testing.T) {
 		})
 	}
 }
+
+// ---- /v1/completions ----
+
+func TestCompletionNonStreaming(t *testing.T) {
+	m := &fakeModel{tokens: []Token{
+		{Text: "blue"},
+		{Text: " sky"},
+		{Done: true, Reason: "stop", PromptTokens: 4, CompletionTokens: 2},
+	}}
+	srv := newTestServer(t, m)
+
+	body := `{"model":"test-model","prompt":"The sky is","max_tokens":8}`
+	resp, err := http.Post(srv.URL+"/v1/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body = %s", resp.StatusCode, b)
+	}
+	var got completionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Object != "text_completion" {
+		t.Errorf("object = %q, want text_completion", got.Object)
+	}
+	if len(got.Choices) != 1 || got.Choices[0].Text != "blue sky" {
+		t.Errorf("choices = %+v, want one with %q", got.Choices, "blue sky")
+	}
+	if got.Usage == nil || got.Usage.PromptTokens != 4 {
+		t.Errorf("usage = %+v, want prompt=4", got.Usage)
+	}
+	// The prompt must reach the model verbatim: no chat template, which is the
+	// entire difference between this endpoint and /v1/chat/completions.
+	if m.gotReq.Prompt != "The sky is" {
+		t.Errorf("prompt = %q, want it passed through untouched", m.gotReq.Prompt)
+	}
+}
+
+func TestCompletionStreaming(t *testing.T) {
+	m := &fakeModel{tokens: []Token{
+		{Text: "a"},
+		{Text: "b"},
+		{Done: true, Reason: "length", PromptTokens: 3, CompletionTokens: 2},
+	}}
+	srv := newTestServer(t, m)
+
+	body := `{"model":"test-model","prompt":"x","stream":true}`
+	resp, err := http.Post(srv.URL+"/v1/completions", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	out := string(raw)
+
+	if !strings.HasSuffix(strings.TrimSpace(out), "data: [DONE]") {
+		t.Errorf("stream did not end with [DONE]:\n%s", out)
+	}
+	var text strings.Builder
+	var finish string
+	var streamUsage *usage
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimPrefix(line, "data: ")
+		if line == "" || line == "[DONE]" {
+			continue
+		}
+		var chunk completionChunk
+		if err := json.Unmarshal([]byte(line), &chunk); err != nil {
+			t.Fatalf("bad chunk %q: %v", line, err)
+		}
+		if chunk.Usage != nil {
+			streamUsage = chunk.Usage
+		}
+		for _, c := range chunk.Choices {
+			text.WriteString(c.Text)
+			if c.FinishReason != "" {
+				finish = c.FinishReason
+			}
+		}
+	}
+	if text.String() != "ab" {
+		t.Errorf("streamed text = %q, want %q", text.String(), "ab")
+	}
+	if finish != "length" {
+		t.Errorf("finish_reason = %q, want length", finish)
+	}
+	if streamUsage == nil || streamUsage.CompletionTokens != 2 {
+		t.Errorf("stream usage = %+v, want completion=2", streamUsage)
+	}
+}
+
+func TestCompletionPromptShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"string prompt", `{"prompt":"hello"}`, http.StatusOK},
+		{"single-element array", `{"prompt":["hello"]}`, http.StatusOK},
+		{"missing prompt", `{"model":"test-model"}`, http.StatusBadRequest},
+		{"empty string", `{"prompt":""}`, http.StatusBadRequest},
+		{"empty array", `{"prompt":[]}`, http.StatusBadRequest},
+		// Answering only the first of several prompts would look like a model
+		// bug to the caller, so it is refused outright.
+		{"batched prompts", `{"prompt":["a","b"]}`, http.StatusBadRequest},
+		{"wrong type", `{"prompt":42}`, http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &fakeModel{tokens: []Token{{Done: true, Reason: "stop"}}}
+			srv := newTestServer(t, m)
+			resp, err := http.Post(srv.URL+"/v1/completions", "application/json", strings.NewReader(tt.body))
+			if err != nil {
+				t.Fatalf("POST: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tt.want {
+				b, _ := io.ReadAll(resp.Body)
+				t.Errorf("status = %d, want %d (%s)", resp.StatusCode, tt.want, b)
+			}
+		})
+	}
+}
