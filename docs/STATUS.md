@@ -1,6 +1,6 @@
 # Where GridLink stands
 
-Last updated: **2026-08-30**, branch `main`, HEAD `b49ee72`, working tree clean.
+Last updated: **2026-08-30**, branch `main`, HEAD `6aa6307`, working tree clean.
 
 Start here, then read CLAUDE.md (settled decisions) and docs/PHASE2.md (spec +
 measured spike results). This file is the "what now"; those two are the "what
@@ -143,10 +143,13 @@ Phase 2 is functionally complete. What remains before calling it shipped:
    SHA256SUMS the installer verifies. What is still missing is somewhere to
    publish them: the installer points at a GitHub releases URL that does not
    exist yet.
-2. **Tailscale end-to-end.** Everything so far ran with
-   `GRIDLINK_DATA_ADDR=127.0.0.1` on one machine. The tailnet path
-   (`dialer.Direct` to a tailnet IP) has never been exercised across two
-   real machines.
+2. ~~Cross-machine data plane~~ — **done over LAN** (`6aa6307`). Gateway on
+   the Raspberry Pi, coordinator and Metal engine on the Mac: inference flows
+   client -> Pi gateway -> Mac engine and back, streaming and not, with usage
+   reported from the Pi to the Mac's coordinator. This found a real bug: the
+   engine bound loopback while the agent advertised a routable address, so
+   the gateway was told to dial a port that existed nowhere. Still untested
+   over an actual **tailnet** (as opposed to a LAN), and across NAT.
 3. **`/v1/completions` is routed but unimplemented by the native engine** —
    it forwards and 404s. Either implement it or stop advertising the route.
 4. **The gateway is a single point of failure** and holds request bodies in
@@ -155,6 +158,23 @@ Phase 2 is functionally complete. What remains before calling it shipped:
 
 Then Phase 3: metering + ledger (Postgres), which is what the usage JSONL
 was shaped for.
+
+Reproduce the two-machine test:
+
+```bash
+# Mac: coordinator + agent advertising the Mac's LAN IP
+GRIDLINK_TOKEN=dev-token GRIDLINK_USAGE_LOG=/tmp/usage.jsonl ./bin/coordinator &
+GRIDLINK_TOKEN=dev-token GRIDLINK_DATA_ADDR=<mac-lan-ip> ./bin/agent &
+# ...create a deployment, wait for READY...
+
+# Pi: gateway pointed at the Mac's coordinator
+cd gateway && CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o ../bin/gateway-linux-arm64 ./cmd/gateway
+scp bin/gateway-linux-arm64 pi5:gateway
+ssh pi5 'GRIDLINK_TOKEN=dev-token GRIDLINK_COORDINATOR=<mac-lan-ip>:50051 \
+  GRIDLINK_GATEWAY_LISTEN=:8099 GRIDLINK_API_KEYS=sk-lan-test ./gateway'
+
+curl -H "Authorization: Bearer sk-lan-test" http://<pi-ip>:8099/v1/chat/completions -d '{...}'
+```
 
 ## Open items that need you, not code
 
